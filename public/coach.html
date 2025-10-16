@@ -16,6 +16,7 @@
   </header>
 
   <main class="container">
+    <!-- Filtres -->
     <section class="panel">
       <h2>Filtrer</h2>
       <div class="grid">
@@ -33,6 +34,7 @@
       </div>
     </section>
 
+    <!-- Création séance ponctuelle -->
     <section class="panel">
       <h2>Créer une séance</h2>
       <form id="createSessionForm" class="grid">
@@ -48,6 +50,46 @@
       </form>
     </section>
 
+    <!-- Création série récurrente -->
+    <section class="panel">
+      <h2>Créer une série (récurrente)</h2>
+      <form id="createSeriesForm" class="grid">
+        <label>
+          Titre
+          <input type="text" id="seriesTitle" placeholder="Entraînement" required />
+        </label>
+        <label>
+          Jours (ISO 1=lun … 7=dim) — ex: 2,4
+          <input type="text" id="seriesDays" placeholder="2,4" required />
+        </label>
+        <label>
+          Heure (locale)
+          <input type="time" id="seriesTime" value="19:00" required />
+        </label>
+        <label>
+          Début
+          <input type="date" id="seriesStart" />
+        </label>
+        <label>
+          Fin (optionnel)
+          <input type="date" id="seriesEnd" />
+        </label>
+        <button type="submit">Créer la série</button>
+      </form>
+    </section>
+
+    <!-- Gestion des séries -->
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Gestion des séries</h2>
+        <div class="actions">
+          <button id="regenBtn" title="Re-matérialiser les prochaines 8–9 semaines">Régénérer 60 jours</button>
+        </div>
+      </div>
+      <div id="seriesContainer" class="table-wrap"></div>
+    </section>
+
+    <!-- Liste membres + présence -->
     <section class="panel">
       <div class="panel-header">
         <h2>Liste des membres</h2>
@@ -72,6 +114,7 @@
     </tr>
   </template>
 
-  <script src="/public/coach.js"></script>
+  <!-- IMPORTANT: chemin sans /public -->
+  <script src="/coach.js"></script>
 </body>
 </html>
