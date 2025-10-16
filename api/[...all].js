@@ -5,16 +5,17 @@ import { sql } from "./db.js";
 const app = express();
 app.use(express.json());
 
-// --- Routes ---
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, status: "healthy", ts: new Date().toISOString() });
-});
-
-app.get("/api/hello", (_req, res) => {
+// --- API simple ---
+app.get("/api/hello", (req, res) => {
   res.json({ message: "Bienvenue sur club-app 👋" });
 });
 
-app.get("/api/db/health", async (_req, res) => {
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, status: "healthy", ts: new Date().toISOString() });
+});
+
+// --- Vérif DB ---
+app.get("/api/db/health", async (req, res) => {
   try {
     const rows = await sql`select now() as now`;
     res.json({ ok: true, now: rows?.[0]?.now ?? null });
@@ -23,11 +24,12 @@ app.get("/api/db/health", async (_req, res) => {
   }
 });
 
-app.get("/api/members", async (_req, res) => {
+// --- Membres ---
+app.get("/api/members", async (req, res) => {
   try {
     const rows = await sql`
-      select m.id, m.first_name, m.last_name, m.email, m.member_number,
-             m.gender, m.birthdate, m.created_at, t.name as team_name
+      select m.id, m.first_name, m.last_name, m.email,
+             m.member_number, m.gender, m.created_at, t.name as team_name
       from members m
       left join teams t on t.id = m.team_id
       where m.deleted = false
@@ -39,5 +41,4 @@ app.get("/api/members", async (_req, res) => {
   }
 });
 
-// Export handler (Zero-Config, Node 22)
 export default serverless(app);
