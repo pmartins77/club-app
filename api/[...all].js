@@ -205,6 +205,119 @@ export default async function handler(req, res) {
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
 
+    /* =========================
+       IMPORTS (Membres & Séances)
+       ========================= */
+
+    // Import Membres (CSV transformé en JSON côté front)
+    if (pathname === "/api/import/members" && method === "POST") {
+      const body = await readBody(req);
+      const rows = Array.isArray(body?.rows) ? body.rows : [];
+      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
+
+      let teamsCreated = 0, inserted = 0, updated = 0;
+
+      for (const r of rows) {
+        const first_name = (r.first_name || "").trim();
+        const last_name  = (r.last_name  || "").trim();
+        const email      = (r.email      || "").trim().toLowerCase();
+        const team_name  = (r.team_name  || "").trim();
+        const member_number = (r.member_number || "").trim();
+        const gender     = (r.gender     || "unknown").trim();
+
+        if (!first_name || !last_name) continue;
+
+        // upsert équipe par nom
+        let team_id = null;
+        if (team_name) {
+          const t = await sql`select id from teams where name=${team_name}`;
+          if (t.length) {
+            team_id = t[0].id;
+          } else {
+            const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
+            team_id = ins[0].id;
+            teamsCreated++;
+          }
+        }
+
+        // upsert membre: priorité email, puis member_number, sinon (first+last)
+        let existing = [];
+        if (email) existing = await sql`select id from members where email=${email}`;
+        if (!existing.length && member_number) existing = await sql`select id from members where member_number=${member_number}`;
+        if (!existing.length) existing = await sql`
+          select id from members
+          where lower(first_name)=lower(${first_name}) and lower(last_name)=lower(${last_name})
+          limit 1
+        `;
+
+        if (existing.length) {
+          const id = existing[0].id;
+          await sql`
+            update members
+            set first_name=${first_name}, last_name=${last_name},
+                email=${email || null}, member_number=${member_number || null},
+                gender=${gender || null}, team_id=${team_id}
+            where id=${id}
+          `;
+          updated++;
+        } else {
+          await sql`
+            insert into members (first_name,last_name,email,team_id,gender,member_number)
+            values (${first_name}, ${last_name}, ${email || null}, ${team_id}, ${gender || null}, ${member_number || null})
+          `;
+          inserted++;
+        }
+      }
+
+      return json(res, 200, { ok:true, teams_created: teamsCreated, inserted, updated });
+    }
+
+    // Import Séances (CSV transformé en JSON côté front)
+    if (pathname === "/api/import/sessions" && method === "POST") {
+      const body = await readBody(req);
+      const rows = Array.isArray(body?.rows) ? body.rows : [];
+      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
+
+      let inserted = 0;
+
+      for (const r of rows) {
+        const team_name = (r.team_name || "").trim();
+        const title     = (r.title     || "").trim() || "Séance";
+        const starts_at = (r.starts_at || "").trim();
+        if (!starts_at) continue;
+
+        // upsert équipe
+        let team_id = null;
+        if (team_name) {
+          const t = await sql`select id from teams where name=${team_name}`;
+          if (t.length) {
+            team_id = t[0].id;
+          } else {
+            const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
+            team_id = ins[0].id;
+          }
+        }
+
+        // éviter doublons exacts (team_id,title,starts_at) — idéalement avec un index unique côté DB
+        const dup = await sql`
+          select 1 from sessions
+          where team_id is not distinct from ${team_id}
+            and title = ${title}
+            and starts_at = ${starts_at}::timestamptz
+          limit 1
+        `;
+        if (dup.length) continue;
+
+        await sql`
+          insert into sessions (team_id,title,starts_at)
+          values (${team_id}, ${title}, ${starts_at}::timestamptz)
+        `;
+        inserted++;
+      }
+
+      return json(res, 200, { ok:true, inserted });
+    }
+
     // 404 API
     if (pathname.startsWith("/api/")) {
       return json(res, 404, { ok: false, error: "Not Found" });
