@@ -4,30 +4,83 @@
 
 import { neon } from "@neondatabase/serverless";
 
-// Helpers
+/* =========================
+   CORS (simple & safe)
+   ========================= */
+const ALLOW_ORIGIN = "*";
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+function isPreflight(req) {
+  return req.method === "OPTIONS";
+}
+
+/* =========================
+   Helpers HTTP
+   ========================= */
 function json(res, code, obj) {
   res.statusCode = code || 200;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(obj));
 }
-async function readBody(req) {
+
+/**
+ * Lit le corps en BRUT (string ou Buffer).
+ * N'essaie PAS de parser JSON.
+ */
+async function readRaw(req) {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (c) => (data += c));
-    req.on("end", () => {
-      try { resolve(data ? JSON.parse(data) : {}); }
-      catch (e) { reject(e); }
-    });
+    const chunks = [];
+    req.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
+
+/**
+ * Lit le corps intelligemment selon le Content-Type :
+ * - application/json -> renvoie l'objet JSON
+ * - text/plain, text/csv -> renvoie { _rawText: "..." }
+ * - autre -> tente JSON puis fallback texte
+ */
+async function readBodySmart(req) {
+  const buf = await readRaw(req);
+  const ctype = (req.headers["content-type"] || "").toLowerCase();
+
+  // JSON explicite
+  if (ctype.includes("application/json")) {
+    try {
+      return JSON.parse(buf.toString("utf8") || "{}");
+    } catch (e) {
+      throw new Error("JSON invalide: " + e.message);
+    }
+  }
+
+  // CSV / texte
+  if (ctype.includes("text/plain") || ctype.includes("text/csv")) {
+    return { _rawText: buf.toString("utf8") };
+  }
+
+  // Tentative JSON, sinon texte
+  const asString = buf.toString("utf8");
+  try {
+    return JSON.parse(asString);
+  } catch {
+    return { _rawText: asString };
+  }
+}
+
 function getSQL() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is not set");
   return neon(url);
 }
 
-// --------- Normalisations / util ---------
+/* =========================
+   Normalisations / util
+   ========================= */
 function normBool(v) {
   if (v == null) return null;
   const s = String(v).trim().toLowerCase();
@@ -36,15 +89,55 @@ function normBool(v) {
        : null;
 }
 function splitName(full) {
-  // "Ines Silva" -> {first:"Ines", last:"Silva"}
   const p = (full || "").trim().split(/\s+/);
   if (p.length === 0) return { first:"", last:"" };
   if (p.length === 1) return { first:p[0], last:"" };
   return { first:p[0], last:p.slice(1).join(" ") };
 }
 
-// Router
+/**
+ * Parse un CSV en tableau d'objets.
+ * - Autodétecte le séparateur ; ou ,
+ * - Utilise la 1ère ligne comme en-têtes
+ * - Trim chaque cellule
+ */
+function parseCSVToRows(csvText) {
+  const text = csvText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return [];
+
+  // Détection séparateur par fréquence
+  const firstLine = text.split("\n")[0];
+  const countSemi = (firstLine.match(/;/g) || []).length;
+  const countComma = (firstLine.match(/,/g) || []).length;
+  const sep = countSemi >= countComma ? ";" : ",";
+
+  const lines = text.split("\n");
+  const headers = lines[0].split(sep).map((h) => h.trim());
+  const rows = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const cols = line.split(sep).map((c) => c.trim());
+    const obj = {};
+    headers.forEach((h, idx) => {
+      obj[h] = cols[idx] ?? "";
+    });
+    rows.push(obj);
+  }
+  return rows;
+}
+
+/* =========================
+   ROUTER
+   ========================= */
 export default async function handler(req, res) {
+  setCors(res);
+  if (isPreflight(req)) {
+    res.statusCode = 204;
+    return res.end();
+  }
+
   try {
     const { method, url } = req;
     const { pathname, searchParams } = new URL(url, "https://dummy.local");
@@ -116,7 +209,7 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, data: rows });
     }
 
-    // Sessions GET/POST (GET supporte ?team_id= OU ?team_name=, et/ou ?date=YYYY-MM-DD)
+    // Sessions GET/POST
     if (pathname === "/api/sessions") {
       if (method === "GET") {
         const team_id = searchParams.get("team_id");
@@ -173,7 +266,7 @@ export default async function handler(req, res) {
       }
 
       if (method === "POST") {
-        const body = await readBody(req);
+        const body = await readBodySmart(req);
         const { title, starts_at, team_id } = body || {};
         if (!title || !starts_at) return json(res, 400, { ok: false, error: "title et starts_at requis" });
         const rows = await sql`
@@ -183,7 +276,7 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true, data: rows[0] });
       }
-      res.setHeader("Allow", "GET, POST");
+      res.setHeader("Allow", "GET, POST, OPTIONS");
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
 
@@ -200,7 +293,7 @@ export default async function handler(req, res) {
         return json(res, 200, { ok: true, data: rows });
       }
       if (method === "POST") {
-        const body = await readBody(req);
+        const body = await readBodySmart(req);
         const { session_id, member_id, present } = body || {};
         if (!session_id || !member_id || typeof present !== "boolean") {
           return json(res, 400, { ok: false, error: "session_id, member_id, present requis" });
@@ -213,7 +306,7 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true });
       }
-      res.setHeader("Allow", "GET, POST");
+      res.setHeader("Allow", "GET, POST, OPTIONS");
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
 
@@ -221,25 +314,43 @@ export default async function handler(req, res) {
        IMPORTS (Membres / Cotisations / Séances)
        ========================= */
 
-    // 1) IMPORT MEMBRES — reconnait "Nom de famille" (ordre officiel)
-    if (pathname === "/api/import/members" && method === "POST") {
-      const body = await readBody(req);
-      const rows = Array.isArray(body?.rows) ? body.rows : [];
-      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
+    // --- IMPORT MEMBRES (JSON rows OU CSV brut) ---
+    if (
+      (pathname === "/api/import/members" || pathname === "/api/import/members-csv") &&
+      method === "POST"
+    ) {
+      const body = await readBodySmart(req);
+
+      // rows JSON ?
+      let rows = Array.isArray(body?.rows) ? body.rows : [];
+
+      // CSV brut ?
+      if (!rows.length && typeof body?._rawText === "string" && body._rawText.trim()) {
+        rows = parseCSVToRows(body._rawText);
+      }
+
+      if (!rows.length) {
+        return json(res, 400, {
+          ok: false,
+          error:
+            "Aucune donnée détectée. Envoyez soit { rows:[...] } en JSON, soit du CSV brut (text/csv ou text/plain).",
+          hint: "CSV attendu avec en-têtes (ex: Prénom;Nom de famille;E-mail;Équipe;Numéro de athlète;Genre;...)"
+        });
+      }
 
       let teamsCreated = 0, inserted = 0, updated = 0;
 
       for (const r0 of rows) {
-        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
 
-        // mapping conforme à ton export (39 colonnes)
-        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
-        const nom = (r["Nom de famille"] || r["Nom"] || "").trim();
-        const fullUsername = (r["Nom d'utilisateur"] || "").trim(); // fallback si nom/prénom vides
-        const email = (r["E-mail"] || r["Email"] || r["E-mail 2"] || "").trim().toLowerCase();
-        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
-        const member_number = (r["Numéro de athlète"] || r["N° de maillot"] || r["N° de réf."] || r["Numéro de réf."] || "").trim();
-        const gender = (r["Genre"] || "").trim().toLowerCase();
+        // mapping conforme à tes exports
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim?.() ?? "";
+        const nom = (r["Nom de famille"] || r["Nom"] || "").trim?.() ?? "";
+        const fullUsername = (r["Nom d'utilisateur"] || "").trim?.() ?? "";
+        const email = (r["E-mail"] || r["Email"] || r["E-mail 2"] || "").trim?.().toLowerCase() ?? "";
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim?.() ?? "";
+        const member_number = (r["Numéro de athlète"] || r["N° de maillot"] || r["N° de réf."] || r["Numéro de réf."] || "").trim?.() ?? "";
+        const gender = (r["Genre"] || "").trim?.().toLowerCase() ?? "";
 
         let first_name = prenom;
         let last_name  = nom;
@@ -292,17 +403,20 @@ export default async function handler(req, res) {
         }
       }
 
-      return json(res, 200, { ok:true, teams_created: teamsCreated, inserted, updated });
+      return json(res, 200, { ok:true, mode: Array.isArray(body?.rows) ? "json" : "csv", teams_created: teamsCreated, inserted, updated });
     }
 
-    // 2) IMPORT COTISATIONS
+    // --- IMPORT COTISATIONS (inchangé) ---
     if (pathname === "/api/import/dues" && method === "POST") {
-      const body = await readBody(req);
-      const season = (body?.season || "2024-2025").trim();
-      const rows = Array.isArray(body?.rows) ? body.rows : [];
-      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
+      const body = await readBodySmart(req);
+      const season = (body?.season || "2024-2025").trim?.() ?? "2024-2025";
+      let rows = Array.isArray(body?.rows) ? body.rows : [];
 
-      // DDL minimal (safe)
+      if (!rows.length && typeof body?._rawText === "string" && body._rawText.trim()) {
+        rows = parseCSVToRows(body._rawText);
+      }
+      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis (JSON ou CSV brut)" });
+
       await sql`
         create table if not exists dues (
           id bigserial primary key,
@@ -326,152 +440,12 @@ export default async function handler(req, res) {
       let upserted = 0, members_created = 0, teams_created = 0;
 
       for (const r0 of rows) {
-        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
 
-        const email = (r["E-mail"] || r["Email"] || "").trim().toLowerCase();
-        const nom = (r["Nom"] || r["Nom d'utilisateur"] || "").trim();
-        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
-        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
-        const refNum = (r["N° de réf."] || r["No de réf."] || r["Numéro de athlète"] || "").trim();
+        const email = (r["E-mail"] || r["Email"] || "").trim?.().toLowerCase() ?? "";
+        const nom = (r["Nom"] || r["Nom d'utilisateur"] || "").trim?.() ?? "";
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim?.() ?? "";
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim?.() ?? "";
+        const refNum = (r["N° de réf."] || r["No de réf."] || r["Numéro de athlète"] || "").trim?.() ?? "";
 
-        const payment_method = (r["Paiement"] || "").trim();
-        const amount = (r["Montant"] || "").replace(',', '.').trim();
-        const status = (r["Statut"] || "").trim();
-
-        const paid_at = (r["Payé le"] || "").trim();
-        const transfer_date = (r["Date du versement"] || "").trim();
-
-        const license_validated = normBool(r["License validée"] || r["Licence validée"]);
-        const license_text = (r["Licence"] || "").trim();
-        const certificate_valid = normBool(r["CERTIFICAT MEDICAL"]);
-        const t_shirt_size = (r["Taille de t-shirt"] || "").trim();
-        const questionnaire_minor = normBool(r["Questionnaire de santé (Mineur)"]);
-
-        // Trouver (ou créer) l’équipe
-        let team_id = null;
-        if (team_name) {
-          const t = await sql`select id from teams where name=${team_name}`;
-          if (t.length) team_id = t[0].id;
-          else {
-            const insT = await sql`insert into teams (name) values (${team_name}) returning id`;
-            team_id = insT[0].id; teams_created++;
-          }
-        }
-
-        // Trouver (ou créer) le membre
-        let member = [];
-        if (email) member = await sql`select id from members where email=${email}`;
-        if (!member.length && refNum) member = await sql`select id from members where member_number=${refNum}`;
-        if (!member.length && (prenom || nom)) {
-          member = await sql`
-            select id from members
-            where lower(first_name)=lower(${prenom}) and lower(last_name)=lower(${nom})
-            limit 1
-          `;
-        }
-        let member_id;
-        if (member.length) {
-          member_id = member[0].id;
-          if (team_id != null) {
-            await sql`update members set team_id=${team_id} where id=${member_id}`;
-          }
-        } else {
-          if (!nom && !prenom && !email && !refNum) continue;
-          const insM = await sql`
-            insert into members (first_name, last_name, email, member_number, team_id)
-            values (${prenom || null}, ${nom || null}, ${email || null}, ${refNum || null}, ${team_id})
-            returning id
-          `;
-          member_id = insM[0].id;
-          members_created++;
-        }
-
-        // Upsert due (member_id + season)
-        const existing = await sql`select id from dues where member_id=${member_id} and season=${season}`;
-        if (existing.length) {
-          await sql`
-            update dues
-            set payment_method=${payment_method || null},
-                amount=${amount ? Number(amount) : null},
-                status=${status || null},
-                paid_at=${paid_at ? paid_at : null}::timestamptz,
-                transfer_date=${transfer_date ? transfer_date : null}::timestamptz,
-                license_validated=${license_validated},
-                license_text=${license_text || null},
-                certificate_valid=${certificate_valid},
-                t_shirt_size=${t_shirt_size || null},
-                questionnaire_minor=${questionnaire_minor}
-            where id=${existing[0].id}
-          `;
-        } else {
-          await sql`
-            insert into dues (member_id, season, payment_method, amount, status, paid_at, transfer_date,
-                              license_validated, license_text, certificate_valid, t_shirt_size, questionnaire_minor)
-            values (${member_id}, ${season}, ${payment_method || null}, ${amount ? Number(amount) : null},
-                    ${status || null}, ${paid_at ? paid_at : null}::timestamptz,
-                    ${transfer_date ? transfer_date : null}::timestamptz,
-                    ${license_validated}, ${license_text || null}, ${certificate_valid},
-                    ${t_shirt_size || null}, ${questionnaire_minor})
-          `;
-        }
-        upserted++;
-      }
-
-      return json(res, 200, { ok:true, upserted, members_created, teams_created, season });
-    }
-
-    // 3) IMPORT SÉANCES (conservé)
-    if (pathname === "/api/import/sessions" && method === "POST") {
-      const body = await readBody(req);
-      const rows = Array.isArray(body?.rows) ? body.rows : [];
-      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
-
-      let inserted = 0;
-      for (const r0 of rows) {
-        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
-        const team_name = (r.team_name || "").trim();
-        const title     = (r.title     || "").trim() || "Séance";
-        const starts_at = (r.starts_at || "").trim();
-        if (!starts_at) continue;
-
-        let team_id = null;
-        if (team_name) {
-          const t = await sql`select id from teams where name=${team_name}`;
-          if (t.length) team_id = t[0].id;
-          else {
-            const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
-            team_id = ins[0].id;
-          }
-        }
-
-        const dup = await sql`
-          select 1 from sessions
-          where team_id is not distinct from ${team_id}
-            and title = ${title}
-            and starts_at = ${starts_at}::timestamptz
-          limit 1
-        `;
-        if (dup.length) continue;
-
-        await sql`
-          insert into sessions (team_id,title,starts_at)
-          values (${team_id}, ${title}, ${starts_at}::timestamptz)
-        `;
-        inserted++;
-      }
-
-      return json(res, 200, { ok:true, inserted });
-    }
-
-    // 404 API
-    if (pathname.startsWith("/api/")) {
-      return json(res, 404, { ok: false, error: "Not Found" });
-    }
-
-    // Pas une route /api/* => laisser Vercel servir le statique
-    res.statusCode = 404;
-    res.end("Not Found");
-  } catch (e) {
-    return json(res, 500, { ok: false, error: e.message });
-  }
-}
+        const payment_method = (r["Paiement
