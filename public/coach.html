@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Club App — Coach</title>
+  <link rel="stylesheet" href="/public/coach.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Coach — Gestion des présences & cotisations</h1>
+    <nav>
+      <a href="/">Accueil</a>
+      <a href="/public/coach.html" aria-current="page">Page Coach</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <h2>Filtrer</h2>
+      <div class="grid">
+        <label>
+          Équipe
+          <select id="teamSelect"></select>
+        </label>
+        <label>
+          Séance
+          <select id="sessionSelect"></select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn">Rafraîchir</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Créer une séance</h2>
+      <form id="createSessionForm" class="grid">
+        <label>
+          Titre
+          <input type="text" id="sessionTitle" placeholder="Entraînement" required />
+        </label>
+        <label>
+          Date & heure (locale)
+          <input type="datetime-local" id="sessionDate" required />
+        </label>
+        <button type="submit">Créer</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Liste des membres</h2>
+        <span id="sessionInfo" class="muted"></span>
+      </div>
+      <div id="membersContainer" class="table-wrap">
+        <!-- table injectée ici -->
+      </div>
+    </section>
+  </main>
+
+  <template id="memberRowTpl">
+    <tr>
+      <td class="name"></td>
+      <td class="team"></td>
+      <td class="dues"></td>
+      <td class="presence">
+        <button class="btn-present">Présent</button>
+        <button class="btn-absent">Absent</button>
+        <span class="status-dot"></span>
+      </td>
+    </tr>
+  </template>
+
+  <script src="/public/coach.js"></script>
+</body>
+</html>
