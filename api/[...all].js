@@ -38,7 +38,7 @@ async function readJSON(req) {
     const ct = (req.headers["content-type"] || "").toLowerCase();
     const hint = ct.includes("json")
       ? "JSON invalide."
-      : "Content-Type non JSON. Envoie application/json ou du CSV (text/csv).";
+      : "Content-Type non JSON. Envoie application/json ou du texte collé depuis Excel (TAB/;/, avec en-têtes).";
     const err = new Error(`Impossible de parser le corps: ${hint}`);
     err.code = "BAD_JSON";
     err.raw = raw.slice(0, 500);
@@ -70,20 +70,24 @@ function splitName(full) {
 }
 
 /* =========================
-   CSV parsing simple (; ou ,) avec guillemets basiques
+   Parsing table (TAB/;/,) avec guillemets basiques
    ========================= */
 function detectDelimiter(headerLine) {
-  // Préférence pour ';' si très présent (exports FR)
-  const sc = (headerLine.match(/;/g) || []).length;
-  const cm = (headerLine.match(/,/g) || []).length;
+  // Excel colle généralement en TAB
+  const tab = (headerLine.match(/\t/g) || []).length;
+  const sc  = (headerLine.match(/;/g) || []).length;
+  const cm  = (headerLine.match(/,/g) || []).length;
+  if (tab > 0 && tab >= sc && tab >= cm) return "\t";
   if (sc >= cm) return ";";
   return ",";
 }
 
-// Parser minimal (suffisant pour exports simples sans guillemets imbriqués)
+// Parser simple (en-têtes + lignes), compatible TAB/;/, et "" pour échapper
 function parseCSV(text) {
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim().length);
-  if (lines.length === 0) return [];
+  const norm = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!norm) return [];
+  const lines = norm.split("\n").filter(l => l.trim().length);
+  if (!lines.length) return [];
   const delim = detectDelimiter(lines[0]);
   const headers = splitCSVLine(lines[0], delim).map(h => h.trim());
 
@@ -91,9 +95,7 @@ function parseCSV(text) {
   for (let i = 1; i < lines.length; i++) {
     const cols = splitCSVLine(lines[i], delim);
     const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = (cols[idx] ?? "").trim();
-    });
+    headers.forEach((h, idx) => { obj[h] = (cols[idx] ?? "").trim(); });
     rows.push(obj);
   }
   return rows;
@@ -106,7 +108,6 @@ function splitCSVLine(line, delim) {
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (ch === '"') {
-      // toggle guillemet (doublon "" => guillemet échappé)
       if (inQuotes && line[i+1] === '"') { cur += '"'; i++; }
       else inQuotes = !inQuotes;
     } else if (ch === delim && !inQuotes) {
@@ -326,10 +327,10 @@ export default async function handler(req, res) {
               body_shape: "{ rows: Array<record> }",
               example: { rows: [{ "Prénom": "Abdellah", "Nom de famille": "BENBEGDAD", "E-mail":"benbegdad.a@hotmail.fr", "Équipe":"Adultes (nés en 2010 et avant)", "Numéro de athlète":"124970", "Genre":"H" }] }
             },
-            post_csv: {
-              content_type: "text/csv",
+            post_text: {
+              content_type: "text/plain | text/csv",
               header_required: true,
-              delimiter: "; or ,"
+              delimiter: "TAB (Excel) ou ; ou ,"
             }
           }
         });
@@ -339,7 +340,7 @@ export default async function handler(req, res) {
         return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
 
-      // Détecte JSON vs CSV selon content-type
+      // JSON vs Texte (TAB/;/,)
       const ctype = (req.headers["content-type"] || "").toLowerCase();
       let rowsInput = [];
       if (ctype.includes("json")) {
@@ -349,15 +350,13 @@ export default async function handler(req, res) {
         const raw = await readRaw(req);
         rowsInput = parseCSV(raw);
       }
-
       if (!rowsInput.length) {
-        return json(res, 400, { ok:false, error:"Aucune ligne détectée (rows vide ou CSV vide)" });
+        return json(res, 400, { ok:false, error:"Aucune ligne détectée (rows vide / texte vide)" });
       }
 
       let teamsCreated = 0, inserted = 0, updated = 0;
 
       for (const r0 of rowsInput) {
-        // normalise clés (trim)
         const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
 
         // mapping conforme export
@@ -430,7 +429,7 @@ export default async function handler(req, res) {
         return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
 
-      // JSON ou CSV
+      // JSON ou Texte
       const ctype = (req.headers["content-type"] || "").toLowerCase();
       let season = "2024-2025";
       let rowsInput = [];
@@ -442,12 +441,11 @@ export default async function handler(req, res) {
       } else {
         const raw = await readRaw(req);
         rowsInput = parseCSV(raw);
-        // si la colonne "Saison" existe on la prend, sinon la valeur par défaut
         const sCol = rowsInput[0]?.["Saison"] || rowsInput[0]?.["season"];
         if (sCol) season = String(sCol).trim() || season;
       }
 
-      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou CSV vide" });
+      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou texte vide" });
 
       // DDL minimal (safe)
       await sql`
@@ -567,7 +565,7 @@ export default async function handler(req, res) {
       return json(res, 200, { ok:true, upserted, members_created, teams_created, season });
     }
 
-    // 3) IMPORT SÉANCES (inchangé, +405 propre)
+    // 3) IMPORT SÉANCES
     if (pathname === "/api/import/sessions") {
       if (method !== "POST") {
         res.setHeader("Allow", "POST");
@@ -582,7 +580,7 @@ export default async function handler(req, res) {
         const raw = await readRaw(req);
         rowsInput = parseCSV(raw);
       }
-      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou CSV vide" });
+      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON ou texte vide)" });
 
       let inserted = 0;
       for (const r0 of rowsInput) {
