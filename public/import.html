@@ -3,154 +3,315 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Club App — Import</title>
-  <link rel="stylesheet" href="/coach.css" />
+  <title>Import — Coller depuis Excel (Membres • Cotisations • Séances)</title>
   <style>
-    .panel p code { background:#f3f4f6; padding:2px 6px; border-radius:6px }
-    textarea { width:100%; min-height:160px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
-    .ok { color:#065f46 }
-    .err { color:#991b1b }
-    .small { font-size:.9em; color:#555 }
+    :root {
+      --bg:#0b1020; --panel:#0f172a; --muted:#94a3b8; --text:#e5e7eb; --brand:#6366f1; --ok:#22c55e; --err:#ef4444;
+      --b:#1e293b; --chip:#1d4ed8; --chipbg:#1e3a8a33;
+    }
+    * { box-sizing: border-box; }
+    body { margin:24px; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--text); background:var(--bg); }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .muted { color: var(--muted); }
+    .wrap { max-width: 1200px; margin: 0 auto; }
+    .tabs { display:flex; gap:8px; margin:16px 0 8px; flex-wrap:wrap; }
+    .tabbtn { border:1px solid var(--b); background:linear-gradient(180deg,#0b1228,#0b1228); color:var(--text); padding:10px 14px; border-radius:10px; cursor:pointer; }
+    .tabbtn.active { outline:2px solid var(--brand); }
+    .panel { border:1px solid var(--b); background:var(--panel); border-radius:14px; padding:16px; display:none; }
+    .panel.active { display:block; }
+    textarea { width:100%; height:180px; background:#0b1228; color:var(--text); border:1px solid var(--b); border-radius:10px; padding:10px; font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:12px 0; }
+    .chip { display:inline-block; background:var(--chipbg); color:#bfdbfe; border:1px solid #1e3a8a; border-radius:999px; padding:2px 8px; font-size:12px; }
+    button { padding:10px 14px; border:1px solid var(--b); background:linear-gradient(180deg,#111827,#0b1228); color:var(--text); border-radius:10px; cursor:pointer; }
+    button.primary { background:linear-gradient(180deg,#312e81,#1e1b4b); border-color:#312e81; }
+    button.ok { background:linear-gradient(180deg,#065f46,#064e3b); border-color:#065f46; }
+    button.warn { background:linear-gradient(180deg,#7f1d1d,#450a0a); border-color:#7f1d1d; }
+    button[disabled] { opacity:.6; cursor:not-allowed; }
+    table { width:100%; border-collapse: collapse; margin-top:10px; }
+    th, td { border:1px solid var(--b); padding:6px 8px; font-size:13px; text-align:left; vertical-align:top; }
+    th { background:#0b1228; position:sticky; top:0; z-index:1; }
+    .status { white-space:pre-wrap; }
+    .oktxt { color: var(--ok); }
+    .errtxt { color: var(--err); }
+    .hint { font-size:13px; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    @media (max-width: 900px){ .grid2 { grid-template-columns: 1fr; } }
+    .small { width: 220px; }
   </style>
 </head>
 <body>
-<header class="topbar">
-  <h1>Import données</h1>
-  <nav>
-    <a href="/">Accueil</a>
-    <a href="/coach.html">Page Coach</a>
-  </nav>
-</header>
+  <div class="wrap">
+    <h1>Import — Coller depuis Excel</h1>
+    <p class="muted">Ouvre ton fichier <b>XLSX</b>, copie les colonnes indiquées, puis <b>colle</b> ci‑dessous. Aucune manipulation CSV/JSON requise.</p>
 
-<main class="container">
-
-  <!-- 1) MEMBRES -->
-  <section class="panel">
-    <h2>1) Import Membres (CSV)</h2>
-    <p class="small">Délimiteur <b>;</b> (point-virgule) ou <b>,</b> détecté automatiquement. En-têtes acceptés (n'importe lesquels) :</p>
-    <p><code>Nom d'utilisateur</code> <code>Nom</code> <code>Prénom</code> <code>E-mail</code> <code>E-mail 2</code> <code>Genre</code> <code>Équipe</code> <code>Équipe/département</code> <code>Numéro de athlète</code></p>
-    <p class="small">Exemples de lignes :<br>
-      <code>Nom d'utilisateur;E-mail;Équipe;Numéro de athlète;Genre</code><br>
-      <code>Ines Silva;ines@example.com;Equipe 10-12 ans;ATH-001;female</code>
-    </p>
-    <textarea id="csvMembers" placeholder="Collez ici le CSV des membres…"></textarea>
-    <div class="actions">
-      <button id="btnMembers">Importer membres</button>
-      <span id="resMembers"></span>
+    <div class="tabs">
+      <button class="tabbtn active" data-tab="membres">Membres</button>
+      <button class="tabbtn" data-tab="dues">Cotisations</button>
+      <button class="tabbtn" data-tab="sessions">Séances</button>
     </div>
-  </section>
 
-  <!-- 2) COTISATIONS -->
-  <section class="panel">
-    <h2>2) Import Cotisations (CSV)</h2>
-    <p class="small">En-têtes supportés (principaux) :</p>
-    <p>
-      <code>#</code> <code>Nom</code> <code>E-mail</code> <code>Équipe</code> <code>Équipe/département</code> <code>N° de réf.</code>
-      <code>Paiement</code> <code>Montant</code> <code>Statut</code> <code>Payé le</code> <code>Date du versement</code>
-      <code>License validée</code> <code>Licence</code> <code>CERTIFICAT MEDICAL</code> <code>Taille de t-shirt</code>
-      <code>Questionnaire de santé (Mineur)</code>
-    </p>
-    <p class="small">La saison peut être précisée en bas (sinon défaut = <b>2024-2025</b>).</p>
-    <textarea id="csvDues" placeholder="Collez ici le CSV des cotisations…"></textarea>
-    <div class="grid" style="margin-top:.5rem">
-      <label>Saison
-        <input type="text" id="season" value="2024-2025" />
-      </label>
-    </div>
-    <div class="actions">
-      <button id="btnDues">Importer cotisations</button>
-      <span id="resDues"></span>
-    </div>
-  </section>
+    <!-- Membres -->
+    <section id="panel-membres" class="panel active">
+      <div class="row">
+        <div class="hint">En‑têtes attendues :
+          <span class="chip">Nom d'utilisateur</span>
+          <span class="chip">E-mail</span>
+          <span class="chip">Équipe</span>
+          <span class="chip">Numéro de athlète</span>
+          <span class="chip">Genre</span>
+          <span class="muted">(ou <i>Prénom</i> + <i>Nom de famille</i> si tu n’as pas <i>Nom d'utilisateur</i>)</span>
+        </div>
+      </div>
+      <div class="row">
+        <button type="button" id="memPaste">Coller</button>
+        <button type="button" id="memPreview">Prévisualiser</button>
+        <button type="button" id="memImport" class="primary" disabled>Importer les membres</button>
+        <span id="memStatus" class="status muted"></span>
+      </div>
+      <textarea id="memArea" placeholder="Collez ici (Ctrl/Cmd+V)…"></textarea>
+      <div id="memPreviewBox"></div>
+    </section>
 
-  <!-- 3) SÉANCES (déjà OK) -->
-  <section class="panel">
-    <h2>3) Import Séances (CSV)</h2>
-    <p class="small">En-têtes : <code>team_name</code> <code>title</code> <code>starts_at</code> (ISO, ex : <code>2025-10-21T19:00:00+02:00</code> ou <code>Z</code>)</p>
-    <textarea id="csvSessions" placeholder="Collez ici le CSV des séances…"></textarea>
-    <div class="actions">
-      <button id="btnSessions">Importer séances</button>
-      <span id="resSessions"></span>
-    </div>
-  </section>
+    <!-- Cotisations -->
+    <section id="panel-dues" class="panel">
+      <div class="grid2">
+        <div class="hint">En‑têtes attendues :
+          <div style="margin-top:6px">
+            <span class="chip">E-mail</span>
+            <span class="chip">Prénom</span>
+            <span class="chip">Nom</span>
+            <span class="chip">Équipe</span>
+            <span class="chip">Numéro de athlète</span>
+            <span class="chip">Paiement</span>
+            <span class="chip">Montant</span>
+            <span class="chip">Statut</span>
+            <span class="chip">Payé le</span>
+            <span class="chip">Date du versement</span>
+            <span class="chip">Licence</span>
+            <span class="chip">Licence validée</span>
+            <span class="chip">CERTIFICAT MEDICAL</span>
+            <span class="chip">Taille de t-shirt</span>
+            <span class="chip">Questionnaire de santé (Mineur)</span>
+            <span class="chip">Saison</span>
+          </div>
+        </div>
+        <div>
+          <label class="muted" for="season">Saison (si absente dans tes colonnes)</label><br/>
+          <input id="season" class="small" value="2024-2025" />
+        </div>
+      </div>
+      <div class="row">
+        <button type="button" id="duesPaste">Coller</button>
+        <button type="button" id="duesPreview">Prévisualiser</button>
+        <button type="button" id="duesImport" class="primary" disabled>Importer les cotisations</button>
+        <span id="duesStatus" class="status muted"></span>
+      </div>
+      <textarea id="duesArea" placeholder="Collez ici (Ctrl/Cmd+V)…"></textarea>
+      <div id="duesPreviewBox"></div>
+    </section>
 
-</main>
+    <!-- Séances -->
+    <section id="panel-sessions" class="panel">
+      <div class="row">
+        <div class="hint">En‑têtes attendues :
+          <span class="chip">Équipe</span>
+          <span class="chip">Titre</span>
+          <span class="chip">Date/Heure</span>
+        </div>
+      </div>
+      <div class="row">
+        <button type="button" id="sesPaste">Coller</button>
+        <button type="button" id="sesPreview">Prévisualiser</button>
+        <button type="button" id="sesImport" class="primary" disabled>Importer les séances</button>
+        <span id="sesStatus" class="status muted"></span>
+      </div>
+      <textarea id="sesArea" placeholder="Collez ici (Ctrl/Cmd+V)…"></textarea>
+      <div id="sesPreviewBox"></div>
+    </section>
+  </div>
 
-<script>
-function detectDelimiter(firstLine) {
-  return (firstLine && firstLine.includes(';')) ? ';' : ',';
-}
-function parseCSV(text) {
-  const raw = (text || '').trim();
-  if (!raw) return { headers: [], rows: [] };
-  const lines = raw.split(/\r?\n/).filter(Boolean);
-  const delim = detectDelimiter(lines[0]);
-  const headers = lines[0].split(delim).map(h => h.trim());
-  const rows = [];
-  for (let i=1;i<lines.length;i++) {
-    const cols = lines[i].split(delim);
-    const obj = {};
-    headers.forEach((h, idx) => obj[h] = (cols[idx] ?? '').trim());
-    rows.push(obj);
-  }
-  return { headers, rows };
-}
-async function post(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type":"application/json" },
-    body: JSON.stringify(body)
-  });
-  const j = await r.json().catch(()=>({}));
-  if (!r.ok || j.ok === false) throw new Error(j.error || r.statusText);
-  return j;
-}
+  <script>
+    // ---------- Onglets ----------
+    const tabbtns = document.querySelectorAll('.tabbtn');
+    tabbtns.forEach(b=>b.addEventListener('click',()=>{
+      tabbtns.forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+      document.getElementById('panel-'+b.dataset.tab).classList.add('active');
+    }));
 
-/* Membres */
-document.getElementById("btnMembers").addEventListener("click", async () => {
-  const el = document.getElementById("csvMembers");
-  const out = document.getElementById("resMembers");
-  out.textContent = "Import en cours…"; out.className = "";
-  try {
-    const { rows } = parseCSV(el.value);
-    const res = await post("/api/import/members", { rows });
-    out.textContent = `OK: ${res.inserted} insérés, ${res.updated} mis à jour, ${res.teams_created} équipes créées`;
-    out.className = "ok";
-  } catch (e) {
-    out.textContent = "Erreur: " + e.message; out.className = "err";
-  }
-});
+    // ---------- Utilitaires parsing ----------
+    function detectDelimiter(headerLine){
+      const t=(headerLine.match(/\t/g)||[]).length, sc=(headerLine.match(/;/g)||[]).length, cm=(headerLine.match(/,/g)||[]).length;
+      if(t>0 && t>=sc && t>=cm) return "\t"; if(sc>=cm) return ";"; return ",";
+    }
+    function splitLine(line, delim){
+      const out=[]; let cur=""; let inQ=false;
+      for(let i=0;i<line.length;i++){
+        const ch=line[i];
+        if(ch==='"'){
+          if(inQ && line[i+1]==='"'){ cur+='"'; i++; } else inQ=!inQ;
+        } else if(ch===delim && !inQ){ out.push(cur); cur=""; }
+        else cur+=ch;
+      }
+      out.push(cur); return out;
+    }
+    function parseTable(text){
+      const norm=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim();
+      if(!norm) return {headers:[], rows:[]};
+      const lines=norm.split('\n').filter(l=>l.trim().length);
+      if(!lines.length) return {headers:[], rows:[]};
+      const delim=detectDelimiter(lines[0]);
+      const headers=splitLine(lines[0],delim).map(h=>h.trim());
+      const rows=[];
+      for(let i=1;i<lines.length;i++){
+        const cols=splitLine(lines[i],delim);
+        const obj={}; headers.forEach((h,idx)=>obj[h]=(cols[idx]??'').trim());
+        rows.push(obj);
+      }
+      return {headers, rows};
+    }
+    function renderPreview(el, headers, rows){
+      if(!headers.length||!rows.length){ el.innerHTML='<p class="muted">Aucune donnée à prévisualiser.</p>'; return; }
+      const max=Math.min(rows.length,100);
+      let html='<div style="overflow:auto; max-height:420px">';
+      html+='<table><thead><tr>' + headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('') + '</tr></thead><tbody>';
+      for(let i=0;i<max;i++){
+        html+='<tr>' + headers.map(h=>`<td>${escapeHtml(rows[i][h]??'')}</td>`).join('') + '</tr>';
+      }
+      html+='</tbody></table></div>';
+      if(rows.length>max) html+=`<p class="muted">(+ ${rows.length-max} lignes non affichées)</p>`;
+      el.innerHTML=html;
+    }
+    function escapeHtml(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;'); }
 
-/* Cotisations */
-document.getElementById("btnDues").addEventListener("click", async () => {
-  const el = document.getElementById("csvDues");
-  const season = document.getElementById("season").value.trim() || "2024-2025";
-  const out = document.getElementById("resDues");
-  out.textContent = "Import en cours…"; out.className = "";
-  try {
-    const { rows } = parseCSV(el.value);
-    const res = await post("/api/import/dues", { season, rows });
-    out.textContent = `OK: ${res.upserted} lignes traitées (${res.members_created} membres créés, ${res.teams_created} équipes créées)`;
-    out.className = "ok";
-  } catch (e) {
-    out.textContent = "Erreur: " + e.message; out.className = "err";
-  }
-});
+    // ---------- Mapping Membres ----------
+    const memArea = document.getElementById('memArea');
+    const memPrev = document.getElementById('memPreview');
+    const memImp = document.getElementById('memImport');
+    const memBox = document.getElementById('memPreviewBox');
+    const memStatus = document.getElementById('memStatus');
+    document.getElementById('memPaste').onclick = async ()=>{ try{ memArea.value = await navigator.clipboard.readText(); }catch{} };
 
-/* Séances */
-document.getElementById("btnSessions").addEventListener("click", async () => {
-  const el = document.getElementById("csvSessions");
-  const out = document.getElementById("resSessions");
-  out.textContent = "Import en cours…"; out.className = "";
-  try {
-    const { rows } = parseCSV(el.value);
-    const res = await post("/api/import/sessions", { rows });
-    out.textContent = `OK: ${res.inserted} séances insérées`;
-    out.className = "ok";
-  } catch (e) {
-    out.textContent = "Erreur: " + e.message; out.className = "err";
-  }
-});
-</script>
+    function normalizeMembers(headers, rows){
+      const need=["E-mail","Équipe","Genre"]; // champs utiles + au moins un identifiant
+      const hasUser=headers.includes("Nom d'utilisateur");
+      const hasName=headers.includes("Prénom") && headers.includes("Nom de famille");
+      const hasNumber=headers.includes("Numéro de athlète")||headers.includes("N° de maillot")||headers.includes("N° de réf.");
+      const missing=need.filter(h=>!headers.includes(h));
+      if(!hasUser && !hasName && !hasNumber){
+        missing.push("Nom d'utilisateur (ou Prénom + Nom de famille ou Numéro de athlète)");
+      }
+      if(missing.length) return { ok:false, error:"En-têtes manquantes: "+missing.join(', ') };
+
+      // On envoie tel quel; le backend fait déjà la logique d’upsert
+      return { ok:true, out: rows };
+    }
+
+    memPrev.onclick = ()=>{
+      const {headers, rows} = parseTable(memArea.value);
+      if(!headers.length||!rows.length){ memBox.innerHTML='<p class="errtxt">Aucune donnée détectée (vérifie les en-têtes).</p>'; memImp.disabled=true; return; }
+      const check=normalizeMembers(headers, rows);
+      if(!check.ok){ memBox.innerHTML=`<p class="errtxt">${escapeHtml(check.error)}</p>`; memImp.disabled=true; return; }
+      renderPreview(memBox, headers, rows);
+      memStatus.textContent = `Prêt à importer ${rows.length} ligne(s).`;
+      memImp.disabled=false;
+      memImp.dataset.payload = JSON.stringify({ rows });
+    };
+
+    memImp.onclick = async () => {
+      memImp.disabled = true; memStatus.textContent = 'Import en cours…';
+      try{
+        const body = memImp.dataset.payload || JSON.stringify({ rows: [] });
+        const r = await fetch('/api/import/members', { method:'POST', headers:{'Content-Type':'application/json'}, body });
+        const data = await r.json().catch(()=>({}));
+        if(!r.ok || !data.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        memStatus.innerHTML = `✅ OK — équipes créées: ${data.teams_created??0} • insérés: ${data.inserted??0} • mis à jour: ${data.updated??0}`;
+        memStatus.className = 'status oktxt';
+      }catch(e){ memStatus.textContent = 'Erreur: '+(e?.message||e); memStatus.className='status errtxt'; }
+      finally{ memImp.disabled=false; }
+    };
+
+    // ---------- Mapping Cotisations ----------
+    const duesArea = document.getElementById('duesArea');
+    const duesPrev = document.getElementById('duesPreview');
+    const duesImp = document.getElementById('duesImport');
+    const duesBox = document.getElementById('duesPreviewBox');
+    const duesStatus = document.getElementById('duesStatus');
+    const seasonEl = document.getElementById('season');
+    document.getElementById('duesPaste').onclick = async ()=>{ try{ duesArea.value = await navigator.clipboard.readText(); }catch{} };
+
+    function normalizeDues(headers, rows){
+      const required = ["E-mail","Équipe","Paiement","Montant","Statut"]; // soft — le back gère les autres
+      const missing = required.filter(h=>!headers.includes(h));
+      if(missing.length) return { ok:false, error:'En-têtes manquantes: '+missing.join(', ') };
+      // Ajout saison si absente
+      const season = (seasonEl.value||'').trim();
+      return { ok:true, out: rows, season };
+    }
+
+    duesPrev.onclick = ()=>{
+      const {headers, rows} = parseTable(duesArea.value);
+      if(!headers.length||!rows.length){ duesBox.innerHTML='<p class="errtxt">Aucune donnée détectée (vérifie les en-têtes).</p>'; duesImp.disabled=true; return; }
+      const check=normalizeDues(headers, rows);
+      if(!check.ok){ duesBox.innerHTML=`<p class=\"errtxt\">${escapeHtml(check.error)}</p>`; duesImp.disabled=true; return; }
+      renderPreview(duesBox, headers, rows);
+      duesStatus.textContent = `Prêt à importer ${rows.length} ligne(s).`;
+      duesImp.disabled=false;
+      duesImp.dataset.payload = JSON.stringify({ season: check.season, rows });
+    };
+
+    duesImp.onclick = async ()=>{
+      duesImp.disabled = true; duesStatus.textContent = 'Import en cours…';
+      try{
+        const body = duesImp.dataset.payload || JSON.stringify({ rows: [] });
+        const r = await fetch('/api/import/dues', { method:'POST', headers:{'Content-Type':'application/json'}, body });
+        const data = await r.json().catch(()=>({}));
+        if(!r.ok || !data.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        duesStatus.innerHTML = `✅ OK — upsertés: ${data.upserted??0} • membres créés: ${data.members_created??0} • équipes créées: ${data.teams_created??0} • saison: ${escapeHtml(data.season||'')}`;
+        duesStatus.className='status oktxt';
+      }catch(e){ duesStatus.textContent = 'Erreur: '+(e?.message||e); duesStatus.className='status errtxt'; }
+      finally{ duesImp.disabled=false; }
+    };
+
+    // ---------- Mapping Séances ----------
+    const sesArea = document.getElementById('sesArea');
+    const sesPrev = document.getElementById('sesPreview');
+    const sesImp = document.getElementById('sesImport');
+    const sesBox = document.getElementById('sesPreviewBox');
+    const sesStatus = document.getElementById('sesStatus');
+    document.getElementById('sesPaste').onclick = async ()=>{ try{ sesArea.value = await navigator.clipboard.readText(); }catch{} };
+
+    function normalizeSessions(headers, rows){
+      const required=["Équipe","Titre","Date/Heure"]; const missing=required.filter(h=>!headers.includes(h));
+      if(missing.length) return { ok:false, error:'En-têtes manquantes: '+missing.join(', ') };
+      // Le backend accepte aussi team_name/title/starts_at — ici on garde les libellés FR, il mappe déjà
+      return { ok:true, out: rows };
+    }
+
+    sesPrev.onclick = ()=>{
+      const {headers, rows} = parseTable(sesArea.value);
+      if(!headers.length||!rows.length){ sesBox.innerHTML='<p class="errtxt">Aucune donnée détectée (vérifie les en-têtes).</p>'; sesImp.disabled=true; return; }
+      const check=normalizeSessions(headers, rows);
+      if(!check.ok){ sesBox.innerHTML=`<p class=\"errtxt\">${escapeHtml(check.error)}</p>`; sesImp.disabled=true; return; }
+      renderPreview(sesBox, headers, rows);
+      sesStatus.textContent = `Prêt à importer ${rows.length} ligne(s).`;
+      sesImp.disabled=false;
+      sesImp.dataset.payload = JSON.stringify({ rows });
+    };
+
+    sesImp.onclick = async ()=>{
+      sesImp.disabled = true; sesStatus.textContent = 'Import en cours…';
+      try{
+        const body = sesImp.dataset.payload || JSON.stringify({ rows: [] });
+        const r = await fetch('/api/import/sessions', { method:'POST', headers:{'Content-Type':'application/json'}, body });
+        const data = await r.json().catch(()=>({}));
+        if(!r.ok || !data.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+        sesStatus.innerHTML = `✅ OK — séances insérées: ${data.inserted??0}`;
+        sesStatus.className='status oktxt';
+      }catch(e){ sesStatus.textContent = 'Erreur: '+(e?.message||e); sesStatus.className='status errtxt'; }
+      finally{ sesImp.disabled=false; }
+    };
+  </script>
 </body>
 </html>
