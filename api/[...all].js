@@ -53,7 +53,7 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, now: rows?.[0]?.now ?? null });
     }
 
-    // Teams
+    // Teams (laisse tel quel même si le front ne l'utilise plus)
     if (pathname === "/api/teams" && method === "GET") {
       const rows = await sql`select id, name from teams order by name`;
       return json(res, 200, { ok: true, data: rows });
@@ -100,11 +100,13 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, data: rows });
     }
 
-    // Sessions GET/POST (GET supporte ?team_id= et/ou ?date=YYYY-MM-DD)
+    // Sessions GET/POST
+    // GET supporte maintenant ?team_id= OU ?team_name=, et/ou ?date=YYYY-MM-DD (Europe/Paris)
     if (pathname === "/api/sessions") {
       if (method === "GET") {
         const team_id = searchParams.get("team_id");
-        const dateStr = searchParams.get("date"); // yyyy-mm-dd (Europe/Paris)
+        const team_name = searchParams.get("team_name"); // NEW
+        const dateStr = searchParams.get("date");        // yyyy-mm-dd, Europe/Paris
 
         let rows;
         if (dateStr) {
@@ -117,6 +119,14 @@ export default async function handler(req, res) {
                 and (date(starts_at at time zone 'Europe/Paris')) = ${dateStr}
               order by starts_at asc
             `;
+          } else if (team_name) {
+            rows = await sql`
+              select id, team_id, title, starts_at
+              from sessions
+              where team_id in (select id from teams where name = ${team_name})
+                and (date(starts_at at time zone 'Europe/Paris')) = ${dateStr}
+              order by starts_at asc
+            `;
           } else {
             rows = await sql`
               select id, team_id, title, starts_at
@@ -126,17 +136,31 @@ export default async function handler(req, res) {
             `;
           }
         } else {
-          // Sans date, renvoyer tout (optionnellement filtré par équipe)
-          rows = team_id
-            ? await sql`select id, team_id, title, starts_at from sessions where team_id=${team_id} order by starts_at desc`
-            : await sql`select id, team_id, title, starts_at from sessions order by starts_at desc`;
+          // Sans date : renvoie tout (optionnellement filtré par équipe)
+          if (team_id) {
+            rows = await sql`
+              select id, team_id, title, starts_at
+              from sessions
+              where team_id = ${team_id}
+              order by starts_at desc
+            `;
+          } else if (team_name) {
+            rows = await sql`
+              select id, team_id, title, starts_at
+              from sessions
+              where team_id in (select id from teams where name = ${team_name})
+              order by starts_at desc
+            `;
+          } else {
+            rows = await sql`select id, team_id, title, starts_at from sessions order by starts_at desc`;
+          }
         }
 
         return json(res, 200, { ok: true, data: rows });
       }
 
       if (method === "POST") {
-        // Tu n'utilises plus la création côté UI, on laisse pour usage futur éventuel
+        // (tu n'utilises plus la création côté UI; on laisse pour usage futur)
         const body = await readBody(req);
         const { title, starts_at, team_id } = body || {};
         if (!title || !starts_at) return json(res, 400, { ok: false, error: "title et starts_at requis" });
