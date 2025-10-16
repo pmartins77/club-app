@@ -35,11 +35,6 @@ function normBool(v) {
        : ["0","false","faux","non","no","n"].includes(s) ? false
        : null;
 }
-function pick(obj, keys) {
-  const out = {};
-  for (const k of keys) if (obj[k] != null) out[k] = obj[k];
-  return out;
-}
 function splitName(full) {
   // "Ines Silva" -> {first:"Ines", last:"Silva"}
   const p = (full || "").trim().split(/\s+/);
@@ -226,7 +221,7 @@ export default async function handler(req, res) {
        IMPORTS (Membres / Cotisations / Séances)
        ========================= */
 
-    // 1) IMPORT MEMBRES
+    // 1) IMPORT MEMBRES — reconnait "Nom de famille" (ordre officiel)
     if (pathname === "/api/import/members" && method === "POST") {
       const body = await readBody(req);
       const rows = Array.isArray(body?.rows) ? body.rows : [];
@@ -235,20 +230,23 @@ export default async function handler(req, res) {
       let teamsCreated = 0, inserted = 0, updated = 0;
 
       for (const r0 of rows) {
-        // mapping d’en-têtes FR variés
         const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
-        const fullName = r["Nom d'utilisateur"] || r["Utilisateur"] || "";
-        const nom = r["Nom"] || "";
-        const prenom = r["Prénom"] || r["Prenom"] || "";
-        const email = (r["E-mail"] || r["Email"] || r["Courriel"] || r["E-mail 2"] || "").trim().toLowerCase();
+
+        // mapping conforme à ton export (39 colonnes)
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
+        const nom = (r["Nom de famille"] || r["Nom"] || "").trim();
+        const fullUsername = (r["Nom d'utilisateur"] || "").trim(); // fallback si nom/prénom vides
+        const email = (r["E-mail"] || r["Email"] || r["E-mail 2"] || "").trim().toLowerCase();
         const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
-        const member_number = (r["Numéro de athlète"] || r["Numéro de athlete"] || r["Numéro de réf."] || r["N° de réf."] || "").trim();
+        const member_number = (r["Numéro de athlète"] || r["N° de maillot"] || r["N° de réf."] || r["Numéro de réf."] || "").trim();
         const gender = (r["Genre"] || "").trim().toLowerCase();
 
         let first_name = prenom;
-        let last_name = nom;
-        if (!first_name && !last_name && fullName) {
-          const sp = splitName(fullName); first_name = sp.first; last_name = sp.last;
+        let last_name  = nom;
+
+        if (!first_name && !last_name && fullUsername) {
+          const sp = splitName(fullUsername);
+          first_name = sp.first; last_name = sp.last;
         }
         if (!first_name && !last_name) continue;
 
@@ -298,7 +296,6 @@ export default async function handler(req, res) {
     }
 
     // 2) IMPORT COTISATIONS
-    // crée la table dues si absente + upsert par membre (lié via email/numéro/nom+prénom)
     if (pathname === "/api/import/dues" && method === "POST") {
       const body = await readBody(req);
       const season = (body?.season || "2024-2025").trim();
@@ -375,12 +372,10 @@ export default async function handler(req, res) {
         let member_id;
         if (member.length) {
           member_id = member[0].id;
-          // On peut mettre à jour l’équipe si fournie
           if (team_id != null) {
             await sql`update members set team_id=${team_id} where id=${member_id}`;
           }
         } else {
-          // créer un membre minimal (si on a au moins un nom)
           if (!nom && !prenom && !email && !refNum) continue;
           const insM = await sql`
             insert into members (first_name, last_name, email, member_number, team_id)
