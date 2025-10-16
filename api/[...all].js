@@ -27,6 +27,27 @@ function getSQL() {
   return neon(url);
 }
 
+// --------- Normalisations / util ---------
+function normBool(v) {
+  if (v == null) return null;
+  const s = String(v).trim().toLowerCase();
+  return ["1","true","vrai","oui","yes","y","x"].includes(s) ? true
+       : ["0","false","faux","non","no","n"].includes(s) ? false
+       : null;
+}
+function pick(obj, keys) {
+  const out = {};
+  for (const k of keys) if (obj[k] != null) out[k] = obj[k];
+  return out;
+}
+function splitName(full) {
+  // "Ines Silva" -> {first:"Ines", last:"Silva"}
+  const p = (full || "").trim().split(/\s+/);
+  if (p.length === 0) return { first:"", last:"" };
+  if (p.length === 1) return { first:p[0], last:"" };
+  return { first:p[0], last:p.slice(1).join(" ") };
+}
+
 // Router
 export default async function handler(req, res) {
   try {
@@ -53,7 +74,7 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, now: rows?.[0]?.now ?? null });
     }
 
-    // Teams (laisse tel quel même si le front ne l'utilise plus)
+    // Teams
     if (pathname === "/api/teams" && method === "GET") {
       const rows = await sql`select id, name from teams order by name`;
       return json(res, 200, { ok: true, data: rows });
@@ -100,17 +121,15 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, data: rows });
     }
 
-    // Sessions GET/POST
-    // GET supporte maintenant ?team_id= OU ?team_name=, et/ou ?date=YYYY-MM-DD (Europe/Paris)
+    // Sessions GET/POST (GET supporte ?team_id= OU ?team_name=, et/ou ?date=YYYY-MM-DD)
     if (pathname === "/api/sessions") {
       if (method === "GET") {
         const team_id = searchParams.get("team_id");
-        const team_name = searchParams.get("team_name"); // NEW
-        const dateStr = searchParams.get("date");        // yyyy-mm-dd, Europe/Paris
+        const team_name = searchParams.get("team_name");
+        const dateStr = searchParams.get("date"); // yyyy-mm-dd (Europe/Paris)
 
         let rows;
         if (dateStr) {
-          // Filtre exact sur la DATE locale Europe/Paris
           if (team_id) {
             rows = await sql`
               select id, team_id, title, starts_at
@@ -136,7 +155,6 @@ export default async function handler(req, res) {
             `;
           }
         } else {
-          // Sans date : renvoie tout (optionnellement filtré par équipe)
           if (team_id) {
             rows = await sql`
               select id, team_id, title, starts_at
@@ -160,7 +178,6 @@ export default async function handler(req, res) {
       }
 
       if (method === "POST") {
-        // (tu n'utilises plus la création côté UI; on laisse pour usage futur)
         const body = await readBody(req);
         const { title, starts_at, team_id } = body || {};
         if (!title || !starts_at) return json(res, 400, { ok: false, error: "title et starts_at requis" });
@@ -206,10 +223,10 @@ export default async function handler(req, res) {
     }
 
     /* =========================
-       IMPORTS (Membres & Séances)
+       IMPORTS (Membres / Cotisations / Séances)
        ========================= */
 
-    // Import Membres (CSV transformé en JSON côté front)
+    // 1) IMPORT MEMBRES
     if (pathname === "/api/import/members" && method === "POST") {
       const body = await readBody(req);
       const rows = Array.isArray(body?.rows) ? body.rows : [];
@@ -217,38 +234,46 @@ export default async function handler(req, res) {
 
       let teamsCreated = 0, inserted = 0, updated = 0;
 
-      for (const r of rows) {
-        const first_name = (r.first_name || "").trim();
-        const last_name  = (r.last_name  || "").trim();
-        const email      = (r.email      || "").trim().toLowerCase();
-        const team_name  = (r.team_name  || "").trim();
-        const member_number = (r.member_number || "").trim();
-        const gender     = (r.gender     || "unknown").trim();
+      for (const r0 of rows) {
+        // mapping d’en-têtes FR variés
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
+        const fullName = r["Nom d'utilisateur"] || r["Utilisateur"] || "";
+        const nom = r["Nom"] || "";
+        const prenom = r["Prénom"] || r["Prenom"] || "";
+        const email = (r["E-mail"] || r["Email"] || r["Courriel"] || r["E-mail 2"] || "").trim().toLowerCase();
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
+        const member_number = (r["Numéro de athlète"] || r["Numéro de athlete"] || r["Numéro de réf."] || r["N° de réf."] || "").trim();
+        const gender = (r["Genre"] || "").trim().toLowerCase();
 
-        if (!first_name || !last_name) continue;
+        let first_name = prenom;
+        let last_name = nom;
+        if (!first_name && !last_name && fullName) {
+          const sp = splitName(fullName); first_name = sp.first; last_name = sp.last;
+        }
+        if (!first_name && !last_name) continue;
 
         // upsert équipe par nom
         let team_id = null;
         if (team_name) {
           const t = await sql`select id from teams where name=${team_name}`;
-          if (t.length) {
-            team_id = t[0].id;
-          } else {
+          if (t.length) team_id = t[0].id;
+          else {
             const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
-            team_id = ins[0].id;
-            teamsCreated++;
+            team_id = ins[0].id; teamsCreated++;
           }
         }
 
-        // upsert membre: priorité email, puis member_number, sinon (first+last)
+        // upsert membre (email -> member_number -> nom+prenom)
         let existing = [];
         if (email) existing = await sql`select id from members where email=${email}`;
         if (!existing.length && member_number) existing = await sql`select id from members where member_number=${member_number}`;
-        if (!existing.length) existing = await sql`
-          select id from members
-          where lower(first_name)=lower(${first_name}) and lower(last_name)=lower(${last_name})
-          limit 1
-        `;
+        if (!existing.length && (first_name || last_name)) {
+          existing = await sql`
+            select id from members
+            where lower(first_name)=lower(${first_name}) and lower(last_name)=lower(${last_name})
+            limit 1
+          `;
+        }
 
         if (existing.length) {
           const id = existing[0].id;
@@ -272,33 +297,158 @@ export default async function handler(req, res) {
       return json(res, 200, { ok:true, teams_created: teamsCreated, inserted, updated });
     }
 
-    // Import Séances (CSV transformé en JSON côté front)
+    // 2) IMPORT COTISATIONS
+    // crée la table dues si absente + upsert par membre (lié via email/numéro/nom+prénom)
+    if (pathname === "/api/import/dues" && method === "POST") {
+      const body = await readBody(req);
+      const season = (body?.season || "2024-2025").trim();
+      const rows = Array.isArray(body?.rows) ? body.rows : [];
+      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
+
+      // DDL minimal (safe)
+      await sql`
+        create table if not exists dues (
+          id bigserial primary key,
+          member_id bigint references members(id) on delete cascade,
+          season text not null,
+          payment_method text,
+          amount numeric(10,2),
+          status text,
+          paid_at timestamptz,
+          transfer_date timestamptz,
+          license_validated boolean,
+          license_text text,
+          certificate_valid boolean,
+          t_shirt_size text,
+          questionnaire_minor boolean,
+          created_at timestamptz not null default now(),
+          unique(member_id, season)
+        )
+      `;
+
+      let upserted = 0, members_created = 0, teams_created = 0;
+
+      for (const r0 of rows) {
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
+
+        const email = (r["E-mail"] || r["Email"] || "").trim().toLowerCase();
+        const nom = (r["Nom"] || r["Nom d'utilisateur"] || "").trim();
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
+        const refNum = (r["N° de réf."] || r["No de réf."] || r["Numéro de athlète"] || "").trim();
+
+        const payment_method = (r["Paiement"] || "").trim();
+        const amount = (r["Montant"] || "").replace(',', '.').trim();
+        const status = (r["Statut"] || "").trim();
+
+        const paid_at = (r["Payé le"] || "").trim();
+        const transfer_date = (r["Date du versement"] || "").trim();
+
+        const license_validated = normBool(r["License validée"] || r["Licence validée"]);
+        const license_text = (r["Licence"] || "").trim();
+        const certificate_valid = normBool(r["CERTIFICAT MEDICAL"]);
+        const t_shirt_size = (r["Taille de t-shirt"] || "").trim();
+        const questionnaire_minor = normBool(r["Questionnaire de santé (Mineur)"]);
+
+        // Trouver (ou créer) l’équipe
+        let team_id = null;
+        if (team_name) {
+          const t = await sql`select id from teams where name=${team_name}`;
+          if (t.length) team_id = t[0].id;
+          else {
+            const insT = await sql`insert into teams (name) values (${team_name}) returning id`;
+            team_id = insT[0].id; teams_created++;
+          }
+        }
+
+        // Trouver (ou créer) le membre
+        let member = [];
+        if (email) member = await sql`select id from members where email=${email}`;
+        if (!member.length && refNum) member = await sql`select id from members where member_number=${refNum}`;
+        if (!member.length && (prenom || nom)) {
+          member = await sql`
+            select id from members
+            where lower(first_name)=lower(${prenom}) and lower(last_name)=lower(${nom})
+            limit 1
+          `;
+        }
+        let member_id;
+        if (member.length) {
+          member_id = member[0].id;
+          // On peut mettre à jour l’équipe si fournie
+          if (team_id != null) {
+            await sql`update members set team_id=${team_id} where id=${member_id}`;
+          }
+        } else {
+          // créer un membre minimal (si on a au moins un nom)
+          if (!nom && !prenom && !email && !refNum) continue;
+          const insM = await sql`
+            insert into members (first_name, last_name, email, member_number, team_id)
+            values (${prenom || null}, ${nom || null}, ${email || null}, ${refNum || null}, ${team_id})
+            returning id
+          `;
+          member_id = insM[0].id;
+          members_created++;
+        }
+
+        // Upsert due (member_id + season)
+        const existing = await sql`select id from dues where member_id=${member_id} and season=${season}`;
+        if (existing.length) {
+          await sql`
+            update dues
+            set payment_method=${payment_method || null},
+                amount=${amount ? Number(amount) : null},
+                status=${status || null},
+                paid_at=${paid_at ? paid_at : null}::timestamptz,
+                transfer_date=${transfer_date ? transfer_date : null}::timestamptz,
+                license_validated=${license_validated},
+                license_text=${license_text || null},
+                certificate_valid=${certificate_valid},
+                t_shirt_size=${t_shirt_size || null},
+                questionnaire_minor=${questionnaire_minor}
+            where id=${existing[0].id}
+          `;
+        } else {
+          await sql`
+            insert into dues (member_id, season, payment_method, amount, status, paid_at, transfer_date,
+                              license_validated, license_text, certificate_valid, t_shirt_size, questionnaire_minor)
+            values (${member_id}, ${season}, ${payment_method || null}, ${amount ? Number(amount) : null},
+                    ${status || null}, ${paid_at ? paid_at : null}::timestamptz,
+                    ${transfer_date ? transfer_date : null}::timestamptz,
+                    ${license_validated}, ${license_text || null}, ${certificate_valid},
+                    ${t_shirt_size || null}, ${questionnaire_minor})
+          `;
+        }
+        upserted++;
+      }
+
+      return json(res, 200, { ok:true, upserted, members_created, teams_created, season });
+    }
+
+    // 3) IMPORT SÉANCES (conservé)
     if (pathname === "/api/import/sessions" && method === "POST") {
       const body = await readBody(req);
       const rows = Array.isArray(body?.rows) ? body.rows : [];
       if (!rows.length) return json(res, 400, { ok:false, error:"rows requis" });
 
       let inserted = 0;
-
-      for (const r of rows) {
+      for (const r0 of rows) {
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [k.trim(), v]));
         const team_name = (r.team_name || "").trim();
         const title     = (r.title     || "").trim() || "Séance";
         const starts_at = (r.starts_at || "").trim();
         if (!starts_at) continue;
 
-        // upsert équipe
         let team_id = null;
         if (team_name) {
           const t = await sql`select id from teams where name=${team_name}`;
-          if (t.length) {
-            team_id = t[0].id;
-          } else {
+          if (t.length) team_id = t[0].id;
+          else {
             const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
             team_id = ins[0].id;
           }
         }
 
-        // éviter doublons exacts (team_id,title,starts_at) — idéalement avec un index unique côté DB
         const dup = await sql`
           select 1 from sessions
           where team_id is not distinct from ${team_id}
