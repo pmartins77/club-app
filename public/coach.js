@@ -1,4 +1,5 @@
 // public/coach.js
+// Version "teams dérivées des membres": on construit le select Equipe depuis /api/members
 
 const els = {
   team: document.getElementById("teamSelect"),
@@ -9,6 +10,8 @@ const els = {
   tpl: document.getElementById("memberRowTpl"),
   sessionInfo: document.getElementById("sessionInfo"),
 };
+
+let _allMembers = []; // cache des membres pour filtrage client
 
 async function api(path, opts) {
   const r = await fetch(path, {
@@ -46,14 +49,14 @@ function renderMembers(members, duesMap, attendanceMap) {
     row.querySelector(".name").textContent = `${m.last_name} ${m.first_name}`;
     row.querySelector(".team").textContent = m.team_name || "—";
 
-    const paid = new Map(duesMap).get(m.id) ?? false;
+    const paid = duesMap.get(m.id) ?? false;
     const duesCell = row.querySelector(".dues");
     const badge = document.createElement("span");
     badge.className = `badge ${paid ? "ok" : "ko"}`;
     badge.textContent = paid ? "À jour" : "À régulariser";
     duesCell.appendChild(badge);
 
-    const present = new Map(attendanceMap).get(m.id) ?? false;
+    const present = attendanceMap.get(m.id) ?? false;
     const dot = row.querySelector(".status-dot");
     dot.className = `status-dot ${present ? "ok" : "ko"}`;
 
@@ -68,17 +71,30 @@ function renderMembers(members, duesMap, attendanceMap) {
 }
 
 /* ---------- Chargements ---------- */
-async function loadTeams() {
-  const { ok, data } = await api("/api/teams");
-  if (!ok) throw new Error("teams");
-  els.team.innerHTML = data.map(t => `<option value="${t.id}">${t.name}</option>`).join("");
+
+// Charge TOUS les membres (sans filtre) puis construit la liste d’équipes depuis team_name
+async function loadMembersAllAndBuildTeams() {
+  const mRes = await api(`/api/members`); // pas de team_id
+  _allMembers = mRes.data ?? [];
+
+  // Construit l’ensemble des équipes depuis team_name
+  const set = new Set();
+  for (const m of _allMembers) {
+    if (m.team_name && m.team_name.trim()) set.add(m.team_name.trim());
+  }
+  const teams = Array.from(set).sort((a,b)=>a.localeCompare(b, "fr"));
+
+  // Options: "Toutes équipes" + équipe(s)
+  els.team.innerHTML = [`<option value="">Toutes équipes</option>`, ...teams.map(n => `<option value="${n}">${n}</option>`)].join("");
 }
 
+// Recharge la liste des séances à partir de la date choisie et (optionnel) team_name
 async function loadSessions() {
-  const team_id = els.team.value || "";
-  const day = els.day.value; // yyyy-mm-dd
-  const qTeam = team_id ? `&team_id=${encodeURIComponent(team_id)}` : "";
+  const team_name = els.team.value || "";     // maintenant c’est le nom (pas l’id)
+  const day = els.day.value;                  // yyyy-mm-dd
+  const qTeam = team_name ? `&team_name=${encodeURIComponent(team_name)}` : "";
   const qDay = day ? `&date=${encodeURIComponent(day)}` : "";
+  // days_ahead=0 : on ne matérialise rien, on lit ce qui est déjà en base
   const { ok, data } = await api(`/api/sessions?days_ahead=0${qTeam}${qDay}`);
   if (!ok) throw new Error("sessions");
   els.session.innerHTML = data
@@ -87,28 +103,31 @@ async function loadSessions() {
   updateSessionInfo();
 }
 
+// Filtre les membres en mémoire selon l’équipe sélectionnée (client-side)
+function getFilteredMembers() {
+  const team_name = els.team.value || "";
+  if (!team_name) return _allMembers;
+  return _allMembers.filter(m => (m.team_name || "").trim() === team_name);
+}
+
 function updateSessionInfo() {
   const sOpt = els.session.selectedOptions[0];
   els.sessionInfo.textContent = sOpt ? `Séance: ${sOpt.textContent}` : "";
 }
 
 async function loadMembersAndAttendance() {
-  const team_id = els.team.value || "";
+  const teamMembers = getFilteredMembers();
   const session_id = els.session.value || "";
 
-  // membres
-  const mRes = await api(`/api/members${team_id ? `?team_id=${team_id}` : ""}`);
-  const members = mRes.data ?? [];
-
-  // cotisations
-  const duesRes = await api(`/api/dues${team_id ? `?team_id=${team_id}` : ""}`);
-  const duesMap = new Map(duesRes.data.map(d => [d.member_id, d.paid_this_season]));
+  // cotisations pour tous (ou filtrés par équipe côté client)
+  const duesRes = await api(`/api/dues`); // on récupère tout puis on mappe
+  const allDuesMap = new Map(duesRes.data.map(d => [d.member_id, d.paid_this_season]));
 
   // présence pour la séance sélectionnée
   const attRes = session_id ? await api(`/api/attendance?session_id=${session_id}`) : { data: [] };
   const attendanceMap = new Map(attRes.data.map(a => [a.member_id, a.present]));
 
-  renderMembers(members, duesMap, attendanceMap);
+  renderMembers(teamMembers, allDuesMap, attendanceMap);
 }
 
 /* ---------- Actions ---------- */
@@ -140,14 +159,17 @@ els.refresh.addEventListener("click", async () => {
 /* ---------- Init ---------- */
 (async function init() {
   try {
-    // équipe + date du jour en valeur par défaut
-    await loadTeams();
+    // Date du jour par défaut
     const today = new Date();
     today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
-    els.day.value = today.toISOString().slice(0,10); // yyyy-mm-dd
+    els.day.value = today.toISOString().slice(0,10);
 
-    await loadSessions();              // sessions du jour (et équipe si choisie)
-    await loadMembersAndAttendance();  // liste + présence/cotis
+    // 1) Tous les membres => construit teams
+    await loadMembersAllAndBuildTeams();
+    // 2) Séances du jour (filtrées potentiellement par team_name)
+    await loadSessions();
+    // 3) Tableau membres + cotis + présence
+    await loadMembersAndAttendance();
   } catch (e) {
     console.error(e);
     alert("Erreur d'initialisation : " + e.message);
