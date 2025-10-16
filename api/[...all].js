@@ -5,70 +5,44 @@
 import { neon } from "@neondatabase/serverless";
 
 /* =========================
-   CORS (simple & safe)
-   ========================= */
-const ALLOW_ORIGIN = "*";
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-function isPreflight(req) {
-  return req.method === "OPTIONS";
-}
-
-/* =========================
-   Helpers HTTP
+   Helpers génériques
    ========================= */
 function json(res, code, obj) {
   res.statusCode = code || 200;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(obj));
 }
+function text(res, code, body) {
+  res.statusCode = code || 200;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.end(body || "");
+}
 
-/**
- * Lit le corps en BRUT (string ou Buffer).
- * N'essaie PAS de parser JSON.
- */
+// Lit le corps tel quel (texte brut), sans parser
 async function readRaw(req) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => resolve(data || ""));
     req.on("error", reject);
   });
 }
 
-/**
- * Lit le corps intelligemment selon le Content-Type :
- * - application/json -> renvoie l'objet JSON
- * - text/plain, text/csv -> renvoie { _rawText: "..." }
- * - autre -> tente JSON puis fallback texte
- */
-async function readBodySmart(req) {
-  const buf = await readRaw(req);
-  const ctype = (req.headers["content-type"] || "").toLowerCase();
-
-  // JSON explicite
-  if (ctype.includes("application/json")) {
-    try {
-      return JSON.parse(buf.toString("utf8") || "{}");
-    } catch (e) {
-      throw new Error("JSON invalide: " + e.message);
-    }
-  }
-
-  // CSV / texte
-  if (ctype.includes("text/plain") || ctype.includes("text/csv")) {
-    return { _rawText: buf.toString("utf8") };
-  }
-
-  // Tentative JSON, sinon texte
-  const asString = buf.toString("utf8");
+// Tente de parser JSON, sinon lève une erreur claire
+async function readJSON(req) {
+  const raw = await readRaw(req);
+  if (!raw.trim()) return {};
   try {
-    return JSON.parse(asString);
-  } catch {
-    return { _rawText: asString };
+    return JSON.parse(raw);
+  } catch (e) {
+    const ct = (req.headers["content-type"] || "").toLowerCase();
+    const hint = ct.includes("json")
+      ? "JSON invalide."
+      : "Content-Type non JSON. Envoie application/json ou du CSV (text/csv).";
+    const err = new Error(`Impossible de parser le corps: ${hint}`);
+    err.code = "BAD_JSON";
+    err.raw = raw.slice(0, 500);
+    throw err;
   }
 }
 
@@ -79,7 +53,7 @@ function getSQL() {
 }
 
 /* =========================
-   Normalisations / util
+   Utils de normalisation
    ========================= */
 function normBool(v) {
   if (v == null) return null;
@@ -95,49 +69,60 @@ function splitName(full) {
   return { first:p[0], last:p.slice(1).join(" ") };
 }
 
-/**
- * Parse un CSV en tableau d'objets.
- * - Autodétecte le séparateur ; ou ,
- * - Utilise la 1ère ligne comme en-têtes
- * - Trim chaque cellule
- */
-function parseCSVToRows(csvText) {
-  const text = csvText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  if (!text) return [];
+/* =========================
+   CSV parsing simple (; ou ,) avec guillemets basiques
+   ========================= */
+function detectDelimiter(headerLine) {
+  // Préférence pour ';' si très présent (exports FR)
+  const sc = (headerLine.match(/;/g) || []).length;
+  const cm = (headerLine.match(/,/g) || []).length;
+  if (sc >= cm) return ";";
+  return ",";
+}
 
-  // Détection séparateur par fréquence
-  const firstLine = text.split("\n")[0];
-  const countSemi = (firstLine.match(/;/g) || []).length;
-  const countComma = (firstLine.match(/,/g) || []).length;
-  const sep = countSemi >= countComma ? ";" : ",";
+// Parser minimal (suffisant pour exports simples sans guillemets imbriqués)
+function parseCSV(text) {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim().length);
+  if (lines.length === 0) return [];
+  const delim = detectDelimiter(lines[0]);
+  const headers = splitCSVLine(lines[0], delim).map(h => h.trim());
 
-  const lines = text.split("\n");
-  const headers = lines[0].split(sep).map((h) => h.trim());
   const rows = [];
-
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const cols = line.split(sep).map((c) => c.trim());
+    const cols = splitCSVLine(lines[i], delim);
     const obj = {};
     headers.forEach((h, idx) => {
-      obj[h] = cols[idx] ?? "";
+      obj[h] = (cols[idx] ?? "").trim();
     });
     rows.push(obj);
   }
   return rows;
 }
 
+function splitCSVLine(line, delim) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      // toggle guillemet (doublon "" => guillemet échappé)
+      if (inQuotes && line[i+1] === '"') { cur += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if (ch === delim && !inQuotes) {
+      out.push(cur); cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
 /* =========================
-   ROUTER
+   Router principal
    ========================= */
 export default async function handler(req, res) {
-  setCors(res);
-  if (isPreflight(req)) {
-    res.statusCode = 204;
-    return res.end();
-  }
-
   try {
     const { method, url } = req;
     const { pathname, searchParams } = new URL(url, "https://dummy.local");
@@ -157,19 +142,31 @@ export default async function handler(req, res) {
     const sql = getSQL();
 
     // DB health
-    if (pathname === "/api/db/health" && method === "GET") {
+    if (pathname === "/api/db/health") {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       const rows = await sql`select now() as now`;
       return json(res, 200, { ok: true, now: rows?.[0]?.now ?? null });
     }
 
     // Teams
-    if (pathname === "/api/teams" && method === "GET") {
+    if (pathname === "/api/teams") {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       const rows = await sql`select id, name from teams order by name`;
       return json(res, 200, { ok: true, data: rows });
     }
 
     // Members (optionnel ?team_id=)
-    if (pathname === "/api/members" && method === "GET") {
+    if (pathname === "/api/members") {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       const team_id = searchParams.get("team_id");
       const rows = team_id
         ? await sql`
@@ -192,7 +189,11 @@ export default async function handler(req, res) {
     }
 
     // Dues (cotisations) (optionnel ?team_id=)
-    if (pathname === "/api/dues" && method === "GET") {
+    if (pathname === "/api/dues") {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       const team_id = searchParams.get("team_id");
       const rows = team_id
         ? await sql`
@@ -261,12 +262,11 @@ export default async function handler(req, res) {
             rows = await sql`select id, team_id, title, starts_at from sessions order by starts_at desc`;
           }
         }
-
         return json(res, 200, { ok: true, data: rows });
       }
 
       if (method === "POST") {
-        const body = await readBodySmart(req);
+        const body = await readJSON(req);
         const { title, starts_at, team_id } = body || {};
         if (!title || !starts_at) return json(res, 400, { ok: false, error: "title et starts_at requis" });
         const rows = await sql`
@@ -276,7 +276,8 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true, data: rows[0] });
       }
-      res.setHeader("Allow", "GET, POST, OPTIONS");
+
+      res.setHeader("Allow", "GET, POST");
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
 
@@ -293,7 +294,7 @@ export default async function handler(req, res) {
         return json(res, 200, { ok: true, data: rows });
       }
       if (method === "POST") {
-        const body = await readBodySmart(req);
+        const body = await readJSON(req);
         const { session_id, member_id, present } = body || {};
         if (!session_id || !member_id || typeof present !== "boolean") {
           return json(res, 400, { ok: false, error: "session_id, member_id, present requis" });
@@ -306,7 +307,7 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true });
       }
-      res.setHeader("Allow", "GET, POST, OPTIONS");
+      res.setHeader("Allow", "GET, POST");
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
 
@@ -314,43 +315,59 @@ export default async function handler(req, res) {
        IMPORTS (Membres / Cotisations / Séances)
        ========================= */
 
-    // --- IMPORT MEMBRES (JSON rows OU CSV brut) ---
-    if (
-      (pathname === "/api/import/members" || pathname === "/api/import/members-csv") &&
-      method === "POST"
-    ) {
-      const body = await readBodySmart(req);
-
-      // rows JSON ?
-      let rows = Array.isArray(body?.rows) ? body.rows : [];
-
-      // CSV brut ?
-      if (!rows.length && typeof body?._rawText === "string" && body._rawText.trim()) {
-        rows = parseCSVToRows(body._rawText);
+    // 1) IMPORT MEMBRES
+    if (pathname === "/api/import/members") {
+      if (method === "GET") {
+        return json(res, 200, {
+          ok: true,
+          usage: {
+            post_json: {
+              content_type: "application/json",
+              body_shape: "{ rows: Array<record> }",
+              example: { rows: [{ "Prénom": "Abdellah", "Nom de famille": "BENBEGDAD", "E-mail":"benbegdad.a@hotmail.fr", "Équipe":"Adultes (nés en 2010 et avant)", "Numéro de athlète":"124970", "Genre":"H" }] }
+            },
+            post_csv: {
+              content_type: "text/csv",
+              header_required: true,
+              delimiter: "; or ,"
+            }
+          }
+        });
+      }
+      if (method !== "POST") {
+        res.setHeader("Allow", "GET, POST");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
 
-      if (!rows.length) {
-        return json(res, 400, {
-          ok: false,
-          error:
-            "Aucune donnée détectée. Envoyez soit { rows:[...] } en JSON, soit du CSV brut (text/csv ou text/plain).",
-          hint: "CSV attendu avec en-têtes (ex: Prénom;Nom de famille;E-mail;Équipe;Numéro de athlète;Genre;...)"
-        });
+      // Détecte JSON vs CSV selon content-type
+      const ctype = (req.headers["content-type"] || "").toLowerCase();
+      let rowsInput = [];
+      if (ctype.includes("json")) {
+        const body = await readJSON(req);
+        rowsInput = Array.isArray(body?.rows) ? body.rows : [];
+      } else {
+        const raw = await readRaw(req);
+        rowsInput = parseCSV(raw);
+      }
+
+      if (!rowsInput.length) {
+        return json(res, 400, { ok:false, error:"Aucune ligne détectée (rows vide ou CSV vide)" });
       }
 
       let teamsCreated = 0, inserted = 0, updated = 0;
 
-      for (const r0 of rows) {
+      for (const r0 of rowsInput) {
+        // normalise clés (trim)
         const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
 
-        // mapping conforme à tes exports
-        const prenom = (r["Prénom"] || r["Prenom"] || "").trim?.() ?? "";
-        const nom = (r["Nom de famille"] || r["Nom"] || "").trim?.() ?? "";
-        const fullUsername = (r["Nom d'utilisateur"] || "").trim?.() ?? "";
-        const email = (r["E-mail"] || r["Email"] || r["E-mail 2"] || "").trim?.().toLowerCase() ?? "";
-        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim?.() ?? "";
-        const member_number = (r["Numéro de athlète"] || r["N° de maillot"] || r["N° de réf."] || r["Numéro de réf."] || "").trim?.() ?? "";
-        const gender = (r["Genre"] || "").trim?.().toLowerCase() ?? "";
+        // mapping conforme export
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
+        const nom = (r["Nom de famille"] || r["Nom"] || "").trim();
+        const fullUsername = (r["Nom d'utilisateur"] || "").trim(); // fallback si nom/prénom vides
+        const email = (r["E-mail"] || r["Email"] || r["E-mail 2"] || "").trim().toLowerCase();
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
+        const member_number = (r["Numéro de athlète"] || r["N° de maillot"] || r["N° de réf."] || r["Numéro de réf."] || "").trim();
+        const gender = (r["Genre"] || "").trim().toLowerCase();
 
         let first_name = prenom;
         let last_name  = nom;
@@ -403,20 +420,36 @@ export default async function handler(req, res) {
         }
       }
 
-      return json(res, 200, { ok:true, mode: Array.isArray(body?.rows) ? "json" : "csv", teams_created: teamsCreated, inserted, updated });
+      return json(res, 200, { ok:true, teams_created: teamsCreated, inserted, updated });
     }
 
-    // --- IMPORT COTISATIONS (inchangé) ---
-    if (pathname === "/api/import/dues" && method === "POST") {
-      const body = await readBodySmart(req);
-      const season = (body?.season || "2024-2025").trim?.() ?? "2024-2025";
-      let rows = Array.isArray(body?.rows) ? body.rows : [];
-
-      if (!rows.length && typeof body?._rawText === "string" && body._rawText.trim()) {
-        rows = parseCSVToRows(body._rawText);
+    // 2) IMPORT COTISATIONS
+    if (pathname === "/api/import/dues") {
+      if (method !== "POST") {
+        res.setHeader("Allow", "POST");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
-      if (!rows.length) return json(res, 400, { ok:false, error:"rows requis (JSON ou CSV brut)" });
 
+      // JSON ou CSV
+      const ctype = (req.headers["content-type"] || "").toLowerCase();
+      let season = "2024-2025";
+      let rowsInput = [];
+
+      if (ctype.includes("json")) {
+        const body = await readJSON(req);
+        season = (body?.season || season).trim();
+        rowsInput = Array.isArray(body?.rows) ? body.rows : [];
+      } else {
+        const raw = await readRaw(req);
+        rowsInput = parseCSV(raw);
+        // si la colonne "Saison" existe on la prend, sinon la valeur par défaut
+        const sCol = rowsInput[0]?.["Saison"] || rowsInput[0]?.["season"];
+        if (sCol) season = String(sCol).trim() || season;
+      }
+
+      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou CSV vide" });
+
+      // DDL minimal (safe)
       await sql`
         create table if not exists dues (
           id bigserial primary key,
@@ -439,13 +472,165 @@ export default async function handler(req, res) {
 
       let upserted = 0, members_created = 0, teams_created = 0;
 
-      for (const r0 of rows) {
+      for (const r0 of rowsInput) {
         const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
 
-        const email = (r["E-mail"] || r["Email"] || "").trim?.().toLowerCase() ?? "";
-        const nom = (r["Nom"] || r["Nom d'utilisateur"] || "").trim?.() ?? "";
-        const prenom = (r["Prénom"] || r["Prenom"] || "").trim?.() ?? "";
-        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim?.() ?? "";
-        const refNum = (r["N° de réf."] || r["No de réf."] || r["Numéro de athlète"] || "").trim?.() ?? "";
+        const email = (r["E-mail"] || r["Email"] || "").trim().toLowerCase();
+        const nom = (r["Nom"] || r["Nom d'utilisateur"] || "").trim();
+        const prenom = (r["Prénom"] || r["Prenom"] || "").trim();
+        const team_name = (r["Équipe"] || r["Equipe"] || r["Équipe/département"] || r["Equipe/département"] || "").trim();
+        const refNum = (r["N° de réf."] || r["No de réf."] || r["Numéro de athlète"] || "").trim();
 
-        const payment_method = (r["Paiement
+        const payment_method = (r["Paiement"] || "").trim();
+        const amount = String(r["Montant"] || "").replace(',', '.').trim();
+        const status = (r["Statut"] || "").trim();
+
+        const paid_at = (r["Payé le"] || "").trim();
+        const transfer_date = (r["Date du versement"] || "").trim();
+
+        const license_validated = normBool(r["License validée"] || r["Licence validée"]);
+        const license_text = (r["Licence"] || "").trim();
+        const certificate_valid = normBool(r["CERTIFICAT MEDICAL"]);
+        const t_shirt_size = (r["Taille de t-shirt"] || "").trim();
+        const questionnaire_minor = normBool(r["Questionnaire de santé (Mineur)"]);
+
+        // Trouver (ou créer) l’équipe
+        let team_id = null;
+        if (team_name) {
+          const t = await sql`select id from teams where name=${team_name}`;
+          if (t.length) team_id = t[0].id;
+          else {
+            const insT = await sql`insert into teams (name) values (${team_name}) returning id`;
+            team_id = insT[0].id; teams_created++;
+          }
+        }
+
+        // Trouver (ou créer) le membre
+        let member = [];
+        if (email) member = await sql`select id from members where email=${email}`;
+        if (!member.length && refNum) member = await sql`select id from members where member_number=${refNum}`;
+        if (!member.length && (prenom || nom)) {
+          member = await sql`
+            select id from members
+            where lower(first_name)=lower(${prenom}) and lower(last_name)=lower(${nom})
+            limit 1
+          `;
+        }
+        let member_id;
+        if (member.length) {
+          member_id = member[0].id;
+          if (team_id != null) {
+            await sql`update members set team_id=${team_id} where id=${member_id}`;
+          }
+        } else {
+          if (!nom && !prenom && !email && !refNum) continue;
+          const insM = await sql`
+            insert into members (first_name, last_name, email, member_number, team_id)
+            values (${prenom || null}, ${nom || null}, ${email || null}, ${refNum || null}, ${team_id})
+            returning id
+          `;
+          member_id = insM[0].id;
+          members_created++;
+        }
+
+        // Upsert due (member_id + season)
+        const existing = await sql`select id from dues where member_id=${member_id} and season=${season}`;
+        if (existing.length) {
+          await sql`
+            update dues
+            set payment_method=${payment_method || null},
+                amount=${amount ? Number(amount) : null},
+                status=${status || null},
+                paid_at=${paid_at ? paid_at : null}::timestamptz,
+                transfer_date=${transfer_date ? transfer_date : null}::timestamptz,
+                license_validated=${license_validated},
+                license_text=${license_text || null},
+                certificate_valid=${certificate_valid},
+                t_shirt_size=${t_shirt_size || null},
+                questionnaire_minor=${questionnaire_minor}
+            where id=${existing[0].id}
+          `;
+        } else {
+          await sql`
+            insert into dues (member_id, season, payment_method, amount, status, paid_at, transfer_date,
+                              license_validated, license_text, certificate_valid, t_shirt_size, questionnaire_minor)
+            values (${member_id}, ${season}, ${payment_method || null}, ${amount ? Number(amount) : null},
+                    ${status || null}, ${paid_at ? paid_at : null}::timestamptz,
+                    ${transfer_date ? transfer_date : null}::timestamptz,
+                    ${license_validated}, ${license_text || null}, ${certificate_valid},
+                    ${t_shirt_size || null}, ${questionnaire_minor})
+          `;
+        }
+        upserted++;
+      }
+
+      return json(res, 200, { ok:true, upserted, members_created, teams_created, season });
+    }
+
+    // 3) IMPORT SÉANCES (inchangé, +405 propre)
+    if (pathname === "/api/import/sessions") {
+      if (method !== "POST") {
+        res.setHeader("Allow", "POST");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
+      const ctype = (req.headers["content-type"] || "").toLowerCase();
+      let rowsInput = [];
+      if (ctype.includes("json")) {
+        const body = await readJSON(req);
+        rowsInput = Array.isArray(body?.rows) ? body.rows : [];
+      } else {
+        const raw = await readRaw(req);
+        rowsInput = parseCSV(raw);
+      }
+      if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou CSV vide" });
+
+      let inserted = 0;
+      for (const r0 of rowsInput) {
+        const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
+        const team_name = (r.team_name || r["Équipe"] || r["Equipe"] || "").trim();
+        const title     = (r.title     || r["Titre"] || "").trim() || "Séance";
+        const starts_at = (r.starts_at || r["Date/Heure"] || "").trim();
+        if (!starts_at) continue;
+
+        let team_id = null;
+        if (team_name) {
+          const t = await sql`select id from teams where name=${team_name}`;
+          if (t.length) team_id = t[0].id;
+          else {
+            const ins = await sql`insert into teams (name) values (${team_name}) returning id`;
+            team_id = ins[0].id;
+          }
+        }
+
+        const dup = await sql`
+          select 1 from sessions
+          where team_id is not distinct from ${team_id}
+            and title = ${title}
+            and starts_at = ${starts_at}::timestamptz
+          limit 1
+        `;
+        if (dup.length) continue;
+
+        await sql`
+          insert into sessions (team_id,title,starts_at)
+          values (${team_id}, ${title}, ${starts_at}::timestamptz)
+        `;
+        inserted++;
+      }
+
+      return json(res, 200, { ok:true, inserted });
+    }
+
+    // 404 API
+    if (pathname.startsWith("/api/")) {
+      return json(res, 404, { ok: false, error: "Not Found", path: pathname });
+    }
+
+    // Pas une route /api/* => laisser Vercel servir le statique
+    res.statusCode = 404;
+    res.end("Not Found");
+  } catch (e) {
+    const msg = e?.message || "Unknown error";
+    return json(res, 500, { ok: false, error: msg });
+  }
+}
