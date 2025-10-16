@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Club App — Import</title>
+  <link rel="stylesheet" href="/coach.css" />
+  <style>
+    .panel p code { background:#f3f4f6; padding:2px 6px; border-radius:6px; }
+    textarea { width:100%; min-height:160px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ok { color:#065f46 }
+    .err { color:#991b1b }
+  </style>
+</head>
+<body>
+<header class="topbar">
+  <h1>Import données</h1>
+  <nav>
+    <a href="/">Accueil</a>
+    <a href="/coach.html">Page Coach</a>
+  </nav>
+</header>
+
+<main class="container">
+  <section class="panel">
+    <h2>1) Import Membres (CSV)</h2>
+    <p>Colonnes attendues (en-têtes exacts) :</p>
+    <p><code>first_name,last_name,email,team_name,member_number,gender</code></p>
+    <p><small>Exemple :<br>
+      <code>Ines,Silva,ines@example.com,Equipe 10-12 ans,ATH-001,female</code>
+    </small></p>
+    <textarea id="csvMembers" placeholder="Collez ici le CSV des membres…"></textarea>
+    <div class="actions">
+      <button id="btnMembers">Importer membres</button>
+      <span id="resMembers"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>2) Import Séances (CSV)</h2>
+    <p>Colonnes attendues (en-têtes exacts) :</p>
+    <p><code>team_name,title,starts_at</code></p>
+    <p><small>
+      <b>starts_at</b> au format ISO (ex : <code>2025-10-21T19:00:00+02:00</code>) ou UTC (ex : <code>2025-10-21T17:00:00Z</code>)<br>
+      Exemple :<br>
+      <code>Equipe Adultes,Entraînement Adultes,2025-10-21T19:00:00+02:00</code>
+    </small></p>
+    <textarea id="csvSessions" placeholder="Collez ici le CSV des séances…"></textarea>
+    <div class="actions">
+      <button id="btnSessions">Importer séances</button>
+      <span id="resSessions"></span>
+    </div>
+  </section>
+</main>
+
+<script>
+function parseCSV(text) {
+  // parseur CSV très simple: séparateur virgule, lignes \n, guillemets non gérés
+  // (si vos données contiennent des virgules dans les champs, on fera évoluer vers Papaparse)
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return { headers: [], rows: [] };
+  const headers = lines[0].split(",").map(h => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(",");
+    const obj = {};
+    headers.forEach((h, idx) => obj[h] = (parts[idx] ?? "").trim());
+    rows.push(obj);
+  }
+  return { headers, rows };
+}
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify(body)
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || r.statusText);
+  return j;
+}
+document.getElementById("btnMembers").addEventListener("click", async () => {
+  const el = document.getElementById("csvMembers");
+  const out = document.getElementById("resMembers");
+  out.textContent = "Import en cours…";
+  out.className = "";
+  try {
+    const { rows } = parseCSV(el.value || "");
+    const res = await post("/api/import/members", { rows });
+    out.textContent = `OK: ${res.inserted} insérés, ${res.updated} mis à jour, ${res.teams_created} équipes créées`;
+    out.className = "ok";
+  } catch (e) {
+    out.textContent = "Erreur: " + e.message;
+    out.className = "err";
+  }
+});
+document.getElementById("btnSessions").addEventListener("click", async () => {
+  const el = document.getElementById("csvSessions");
+  const out = document.getElementById("resSessions");
+  out.textContent = "Import en cours…";
+  out.className = "";
+  try {
+    const { rows } = parseCSV(el.value || "");
+    const res = await post("/api/import/sessions", { rows });
+    out.textContent = `OK: ${res.inserted} séances insérées`;
+    out.className = "ok";
+  } catch (e) {
+    out.textContent = "Erreur: " + e.message;
+    out.className = "err";
+  }
+});
+</script>
+</body>
+</html>
