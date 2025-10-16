@@ -100,16 +100,43 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, data: rows });
     }
 
-    // Sessions GET/POST
+    // Sessions GET/POST (GET supporte ?team_id= et/ou ?date=YYYY-MM-DD)
     if (pathname === "/api/sessions") {
       if (method === "GET") {
         const team_id = searchParams.get("team_id");
-        const rows = team_id
-          ? await sql`select id, team_id, title, starts_at from sessions where team_id=${team_id} order by starts_at desc`
-          : await sql`select id, team_id, title, starts_at from sessions order by starts_at desc`;
+        const dateStr = searchParams.get("date"); // yyyy-mm-dd (Europe/Paris)
+
+        let rows;
+        if (dateStr) {
+          // Filtre exact sur la DATE locale Europe/Paris
+          if (team_id) {
+            rows = await sql`
+              select id, team_id, title, starts_at
+              from sessions
+              where team_id = ${team_id}
+                and (date(starts_at at time zone 'Europe/Paris')) = ${dateStr}
+              order by starts_at asc
+            `;
+          } else {
+            rows = await sql`
+              select id, team_id, title, starts_at
+              from sessions
+              where (date(starts_at at time zone 'Europe/Paris')) = ${dateStr}
+              order by starts_at asc
+            `;
+          }
+        } else {
+          // Sans date, renvoyer tout (optionnellement filtré par équipe)
+          rows = team_id
+            ? await sql`select id, team_id, title, starts_at from sessions where team_id=${team_id} order by starts_at desc`
+            : await sql`select id, team_id, title, starts_at from sessions order by starts_at desc`;
+        }
+
         return json(res, 200, { ok: true, data: rows });
       }
+
       if (method === "POST") {
+        // Tu n'utilises plus la création côté UI, on laisse pour usage futur éventuel
         const body = await readBody(req);
         const { title, starts_at, team_id } = body || {};
         if (!title || !starts_at) return json(res, 400, { ok: false, error: "title et starts_at requis" });
