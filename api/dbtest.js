@@ -1,0 +1,15 @@
+import { neon } from "@neondatabase/serverless";
+
+export default async function handler(req, res) {
+  try {
+    const url = process.env.DATABASE_URL;
+    if (!url) {
+      return res.status(500).json({ ok: false, error: "DATABASE_URL is not set" });
+    }
+    const sql = neon(url);
+    const rows = await sql`select now() as now`;
+    res.status(200).json({ ok: true, now: rows?.[0]?.now ?? null });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+}
