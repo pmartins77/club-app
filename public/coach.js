@@ -1,10 +1,10 @@
+// public/coach.js
+
 const els = {
   team: document.getElementById("teamSelect"),
+  day: document.getElementById("daySelect"),
   session: document.getElementById("sessionSelect"),
   refresh: document.getElementById("refreshBtn"),
-  createForm: document.getElementById("createSessionForm"),
-  title: document.getElementById("sessionTitle"),
-  date: document.getElementById("sessionDate"),
   membersContainer: document.getElementById("membersContainer"),
   tpl: document.getElementById("memberRowTpl"),
   sessionInfo: document.getElementById("sessionInfo"),
@@ -16,10 +16,15 @@ async function api(path, opts) {
     ...opts,
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  if (!r.ok) {
+    let msg = `${path}: ${r.status}`;
+    try { const j = await r.json(); if (j?.error) msg += ` – ${j.error}`; } catch {}
+    throw new Error(msg);
+  }
   return r.json();
 }
 
+/* ---------- Rendu membres ---------- */
 function renderMembers(members, duesMap, attendanceMap) {
   const table = document.createElement("table");
   table.className = "table";
@@ -41,21 +46,19 @@ function renderMembers(members, duesMap, attendanceMap) {
     row.querySelector(".name").textContent = `${m.last_name} ${m.first_name}`;
     row.querySelector(".team").textContent = m.team_name || "—";
 
-    const paid = duesMap.get(m.id) ?? false;
+    const paid = new Map(duesMap).get(m.id) ?? false;
     const duesCell = row.querySelector(".dues");
     const badge = document.createElement("span");
     badge.className = `badge ${paid ? "ok" : "ko"}`;
     badge.textContent = paid ? "À jour" : "À régulariser";
     duesCell.appendChild(badge);
 
-    const present = attendanceMap.get(m.id) ?? false;
+    const present = new Map(attendanceMap).get(m.id) ?? false;
     const dot = row.querySelector(".status-dot");
     dot.className = `status-dot ${present ? "ok" : "ko"}`;
 
-    const btnP = row.querySelector(".btn-present");
-    const btnA = row.querySelector(".btn-absent");
-    btnP.addEventListener("click", () => savePresence(m.id, true));
-    btnA.addEventListener("click", () => savePresence(m.id, false));
+    row.querySelector(".btn-present").addEventListener("click", () => savePresence(m.id, true));
+    row.querySelector(".btn-absent").addEventListener("click", () => savePresence(m.id, false));
 
     tbody.appendChild(row);
   }
@@ -64,6 +67,7 @@ function renderMembers(members, duesMap, attendanceMap) {
   els.membersContainer.appendChild(table);
 }
 
+/* ---------- Chargements ---------- */
 async function loadTeams() {
   const { ok, data } = await api("/api/teams");
   if (!ok) throw new Error("teams");
@@ -72,9 +76,14 @@ async function loadTeams() {
 
 async function loadSessions() {
   const team_id = els.team.value || "";
-  const { ok, data } = await api(`/api/sessions${team_id ? `?team_id=${team_id}` : ""}`);
+  const day = els.day.value; // yyyy-mm-dd
+  const qTeam = team_id ? `&team_id=${encodeURIComponent(team_id)}` : "";
+  const qDay = day ? `&date=${encodeURIComponent(day)}` : "";
+  const { ok, data } = await api(`/api/sessions?days_ahead=0${qTeam}${qDay}`);
   if (!ok) throw new Error("sessions");
-  els.session.innerHTML = data.map(s => `<option value="${s.id}">${new Date(s.starts_at).toLocaleString()} — ${s.title}</option>`).join("");
+  els.session.innerHTML = data
+    .map(s => `<option value="${s.id}">${new Date(s.starts_at).toLocaleString()} — ${s.title}</option>`)
+    .join("");
   updateSessionInfo();
 }
 
@@ -86,49 +95,36 @@ function updateSessionInfo() {
 async function loadMembersAndAttendance() {
   const team_id = els.team.value || "";
   const session_id = els.session.value || "";
-  // members
+
+  // membres
   const mRes = await api(`/api/members${team_id ? `?team_id=${team_id}` : ""}`);
   const members = mRes.data ?? [];
 
-  // dues
+  // cotisations
   const duesRes = await api(`/api/dues${team_id ? `?team_id=${team_id}` : ""}`);
   const duesMap = new Map(duesRes.data.map(d => [d.member_id, d.paid_this_season]));
 
-  // attendance of session
+  // présence pour la séance sélectionnée
   const attRes = session_id ? await api(`/api/attendance?session_id=${session_id}`) : { data: [] };
   const attendanceMap = new Map(attRes.data.map(a => [a.member_id, a.present]));
 
   renderMembers(members, duesMap, attendanceMap);
 }
 
+/* ---------- Actions ---------- */
 async function savePresence(member_id, present) {
   const session_id = els.session.value;
-  if (!session_id) {
-    alert("Sélectionne d'abord une séance.");
-    return;
-  }
-  await api("/api/attendance", {
-    method: "POST",
-    body: { session_id, member_id, present }
-  });
+  if (!session_id) return alert("Sélectionne d'abord une séance.");
+  await api("/api/attendance", { method: "POST", body: { session_id, member_id, present } });
   await loadMembersAndAttendance();
 }
 
-async function createSession(e) {
-  e.preventDefault();
-  const team_id = els.team.value || null;
-  const title = els.title.value?.trim() || "Entraînement";
-  const starts_at = els.date.value ? new Date(els.date.value).toISOString() : null;
-  if (!starts_at) return alert("Choisis une date/heure.");
-
-  await api("/api/sessions", { method: "POST", body: { title, starts_at, team_id } });
-  els.title.value = "Entraînement";
-  els.date.value = "";
+/* ---------- Events ---------- */
+els.team.addEventListener("change", async () => {
   await loadSessions();
   await loadMembersAndAttendance();
-}
-
-els.team.addEventListener("change", async () => {
+});
+els.day.addEventListener("change", async () => {
   await loadSessions();
   await loadMembersAndAttendance();
 });
@@ -140,19 +136,18 @@ els.refresh.addEventListener("click", async () => {
   await loadSessions();
   await loadMembersAndAttendance();
 });
-els.createForm.addEventListener("submit", createSession);
 
-// Init
+/* ---------- Init ---------- */
 (async function init() {
   try {
-    // Valeur par défaut du champ datetime-local : maintenant
-    const now = new Date();
-    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-    document.getElementById("sessionDate").value = now.toISOString().slice(0,16);
-
+    // équipe + date du jour en valeur par défaut
     await loadTeams();
-    await loadSessions();
-    await loadMembersAndAttendance();
+    const today = new Date();
+    today.setMinutes(today.getMinutes() - today.getTimezoneOffset());
+    els.day.value = today.toISOString().slice(0,10); // yyyy-mm-dd
+
+    await loadSessions();              // sessions du jour (et équipe si choisie)
+    await loadMembersAndAttendance();  // liste + présence/cotis
   } catch (e) {
     console.error(e);
     alert("Erreur d'initialisation : " + e.message);
