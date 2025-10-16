@@ -6,10 +6,11 @@
   <title>Club App — Import</title>
   <link rel="stylesheet" href="/coach.css" />
   <style>
-    .panel p code { background:#f3f4f6; padding:2px 6px; border-radius:6px; }
-    textarea { width:100%; min-height:160px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .panel p code { background:#f3f4f6; padding:2px 6px; border-radius:6px }
+    textarea { width:100%; min-height:160px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace }
     .ok { color:#065f46 }
     .err { color:#991b1b }
+    .small { font-size:.9em; color:#555 }
   </style>
 </head>
 <body>
@@ -22,13 +23,16 @@
 </header>
 
 <main class="container">
+
+  <!-- 1) MEMBRES -->
   <section class="panel">
     <h2>1) Import Membres (CSV)</h2>
-    <p>Colonnes attendues (en-têtes exacts) :</p>
-    <p><code>first_name,last_name,email,team_name,member_number,gender</code></p>
-    <p><small>Exemple :<br>
-      <code>Ines,Silva,ines@example.com,Equipe 10-12 ans,ATH-001,female</code>
-    </small></p>
+    <p class="small">Délimiteur <b>;</b> (point-virgule) ou <b>,</b> détecté automatiquement. En-têtes acceptés (n'importe lesquels) :</p>
+    <p><code>Nom d'utilisateur</code> <code>Nom</code> <code>Prénom</code> <code>E-mail</code> <code>E-mail 2</code> <code>Genre</code> <code>Équipe</code> <code>Équipe/département</code> <code>Numéro de athlète</code></p>
+    <p class="small">Exemples de lignes :<br>
+      <code>Nom d'utilisateur;E-mail;Équipe;Numéro de athlète;Genre</code><br>
+      <code>Ines Silva;ines@example.com;Equipe 10-12 ans;ATH-001;female</code>
+    </p>
     <textarea id="csvMembers" placeholder="Collez ici le CSV des membres…"></textarea>
     <div class="actions">
       <button id="btnMembers">Importer membres</button>
@@ -36,35 +40,57 @@
     </div>
   </section>
 
+  <!-- 2) COTISATIONS -->
   <section class="panel">
-    <h2>2) Import Séances (CSV)</h2>
-    <p>Colonnes attendues (en-têtes exacts) :</p>
-    <p><code>team_name,title,starts_at</code></p>
-    <p><small>
-      <b>starts_at</b> au format ISO (ex : <code>2025-10-21T19:00:00+02:00</code>) ou UTC (ex : <code>2025-10-21T17:00:00Z</code>)<br>
-      Exemple :<br>
-      <code>Equipe Adultes,Entraînement Adultes,2025-10-21T19:00:00+02:00</code>
-    </small></p>
+    <h2>2) Import Cotisations (CSV)</h2>
+    <p class="small">En-têtes supportés (principaux) :</p>
+    <p>
+      <code>#</code> <code>Nom</code> <code>E-mail</code> <code>Équipe</code> <code>Équipe/département</code> <code>N° de réf.</code>
+      <code>Paiement</code> <code>Montant</code> <code>Statut</code> <code>Payé le</code> <code>Date du versement</code>
+      <code>License validée</code> <code>Licence</code> <code>CERTIFICAT MEDICAL</code> <code>Taille de t-shirt</code>
+      <code>Questionnaire de santé (Mineur)</code>
+    </p>
+    <p class="small">La saison peut être précisée en bas (sinon défaut = <b>2024-2025</b>).</p>
+    <textarea id="csvDues" placeholder="Collez ici le CSV des cotisations…"></textarea>
+    <div class="grid" style="margin-top:.5rem">
+      <label>Saison
+        <input type="text" id="season" value="2024-2025" />
+      </label>
+    </div>
+    <div class="actions">
+      <button id="btnDues">Importer cotisations</button>
+      <span id="resDues"></span>
+    </div>
+  </section>
+
+  <!-- 3) SÉANCES (déjà OK) -->
+  <section class="panel">
+    <h2>3) Import Séances (CSV)</h2>
+    <p class="small">En-têtes : <code>team_name</code> <code>title</code> <code>starts_at</code> (ISO, ex : <code>2025-10-21T19:00:00+02:00</code> ou <code>Z</code>)</p>
     <textarea id="csvSessions" placeholder="Collez ici le CSV des séances…"></textarea>
     <div class="actions">
       <button id="btnSessions">Importer séances</button>
       <span id="resSessions"></span>
     </div>
   </section>
+
 </main>
 
 <script>
+function detectDelimiter(firstLine) {
+  return (firstLine && firstLine.includes(';')) ? ';' : ',';
+}
 function parseCSV(text) {
-  // parseur CSV très simple: séparateur virgule, lignes \n, guillemets non gérés
-  // (si vos données contiennent des virgules dans les champs, on fera évoluer vers Papaparse)
-  const lines = text.trim().split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return { headers: [], rows: [] };
-  const headers = lines[0].split(",").map(h => h.trim());
+  const raw = (text || '').trim();
+  if (!raw) return { headers: [], rows: [] };
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const delim = detectDelimiter(lines[0]);
+  const headers = lines[0].split(delim).map(h => h.trim());
   const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split(",");
+  for (let i=1;i<lines.length;i++) {
+    const cols = lines[i].split(delim);
     const obj = {};
-    headers.forEach((h, idx) => obj[h] = (parts[idx] ?? "").trim());
+    headers.forEach((h, idx) => obj[h] = (cols[idx] ?? '').trim());
     rows.push(obj);
   }
   return { headers, rows };
@@ -75,38 +101,54 @@ async function post(path, body) {
     headers: { "Content-Type":"application/json" },
     body: JSON.stringify(body)
   });
-  const j = await r.json().catch(() => ({}));
+  const j = await r.json().catch(()=>({}));
   if (!r.ok || j.ok === false) throw new Error(j.error || r.statusText);
   return j;
 }
+
+/* Membres */
 document.getElementById("btnMembers").addEventListener("click", async () => {
   const el = document.getElementById("csvMembers");
   const out = document.getElementById("resMembers");
-  out.textContent = "Import en cours…";
-  out.className = "";
+  out.textContent = "Import en cours…"; out.className = "";
   try {
-    const { rows } = parseCSV(el.value || "");
+    const { rows } = parseCSV(el.value);
     const res = await post("/api/import/members", { rows });
     out.textContent = `OK: ${res.inserted} insérés, ${res.updated} mis à jour, ${res.teams_created} équipes créées`;
     out.className = "ok";
   } catch (e) {
-    out.textContent = "Erreur: " + e.message;
-    out.className = "err";
+    out.textContent = "Erreur: " + e.message; out.className = "err";
   }
 });
+
+/* Cotisations */
+document.getElementById("btnDues").addEventListener("click", async () => {
+  const el = document.getElementById("csvDues");
+  const season = document.getElementById("season").value.trim() || "2024-2025";
+  const out = document.getElementById("resDues");
+  out.textContent = "Import en cours…"; out.className = "";
+  try {
+    const { rows } = parseCSV(el.value);
+    const res = await post("/api/import/dues", { season, rows });
+    out.textContent = `OK: ${res.upserted} lignes traitées (${res.members_created} membres créés, ${res.teams_created} équipes créées)`;
+    out.className = "ok";
+  } catch (e) {
+    out.textContent = "Erreur: " + e.message; out.className = "err";
+  }
+});
+
+/* Séances */
 document.getElementById("btnSessions").addEventListener("click", async () => {
   const el = document.getElementById("csvSessions");
   const out = document.getElementById("resSessions");
-  out.textContent = "Import en cours…";
-  out.className = "";
+  out.textContent = "Import en cours…"; out.className = "";
   try {
-    const { rows } = parseCSV(el.value || "");
+    const { rows } = parseCSV(el.value);
     const res = await post("/api/import/sessions", { rows });
     out.textContent = `OK: ${res.inserted} séances insérées`;
     out.className = "ok";
   } catch (e) {
-    out.textContent = "Erreur: " + e.message;
-    out.className = "err";
+    out.textContent = "Erreur: " + e.message; out.className = "err";
   }
 });
 </script>
