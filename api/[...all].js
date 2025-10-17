@@ -72,6 +72,22 @@ function splitName(full) {
   return { first:p[0], last:p.slice(1).join(" ") };
 }
 
+/* ===== Saisons sportives (1 août → 30 juin) ===== */
+const PIVOT_MONTH = 8; // Août
+function seasonLabelFromDate(d, pivotMonth = PIVOT_MONTH) {
+  const dt = d instanceof Date ? d : new Date(d);
+  const y = dt.getUTCFullYear(); const m = dt.getUTCMonth() + 1;
+  return (m >= pivotMonth) ? `${y}/${y + 1}` : `${y - 1}/${y}`;
+}
+function currentSeasonLabel(now = new Date()) { return seasonLabelFromDate(now); }
+function seasonBounds(seasonLabel, pivotMonth = PIVOT_MONTH) {
+  const [y1, y2] = String(seasonLabel).split("/").map(Number);
+  if (!y1 || !y2 || y2 !== y1 + 1) throw new Error("Season label invalide (ex: 2025/2026)");
+  const start = new Date(Date.UTC(y1, pivotMonth - 1, 1, 0, 0, 0, 0)); // 1 août
+  const end   = new Date(Date.UTC(y2, 5, 30, 23, 59, 59, 999));        // 30 juin
+  return { start, end };
+}
+
 /* =========================
    Parsing CSV/TAB
    ========================= */
@@ -236,27 +252,31 @@ export default async function handler(req, res) {
       return json(res, 200, { ok: true, data: rows });
     }
 
-    // Dues (cotisations) (optionnel ?team_id=)
+    // Dues (cotisations) — GET ?team_id=&season=YYYY/YYYY+1
     if (is("/api/dues")) {
-      if (method !== "GET") {
-        res.setHeader("Allow", "GET");
-        return json(res, 405, { ok:false, error:"Method Not Allowed" });
-      }
+      if (method !== "GET") { res.setHeader("Allow","GET"); return json(res,405,{ok:false,error:"Method Not Allowed"}); }
       const params = new URL(rawUrl, "https://dummy.local").searchParams;
       const team_id = params.get("team_id");
-      const rows = team_id
-        ? await sql`
-            select member_id, first_name, last_name, email, member_number, team_name, paid_this_season
-            from v_members_dues
-            where team_name in (select name from teams where id = ${team_id})
-            order by last_name, first_name
-          `
-        : await sql`
-            select member_id, first_name, last_name, email, member_number, team_name, paid_this_season
-            from v_members_dues
-            order by last_name, first_name
-          `;
-      return json(res, 200, { ok: true, data: rows });
+      const season = params.get("season") || currentSeasonLabel(); // ex: 2025/2026
+      const { start, end } = seasonBounds(season);
+      const whereTeam = team_id ? sql`m.team_id = ${team_id}` : sql`true`;
+      const rows = await sql`
+        select
+          m.id as member_id, m.first_name, m.last_name, m.email, m.member_number,
+          t.name as team_name,
+          exists (
+            select 1 from dues d
+            where d.member_id = m.id
+              and (d.status = 'paid' or d.status = 'exempt')
+              and coalesce(d.paid_at, d.transfer_date) >= ${start.toISOString()}::timestamptz
+              and coalesce(d.paid_at, d.transfer_date) <= ${end.toISOString()}::timestamptz
+          ) as paid_this_season
+        from members m
+        left join teams t on t.id = m.team_id
+        where m.deleted = false and ${whereTeam}
+        order by m.last_name, m.first_name
+      `;
+      return json(res, 200, { ok:true, season, start:start.toISOString(), end:end.toISOString(), data: rows });
     }
 
     // Sessions GET/POST (GET: ?team_id= | ?team_name= | ?date=YYYY-MM-DD)
@@ -483,20 +503,15 @@ export default async function handler(req, res) {
         return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
 
-      // JSON ou Texte
       const ctype = (req.headers["content-type"] || "").toLowerCase();
-      let season = "2024-2025";
+      let defaultSeason = currentSeasonLabel();
       let rowsInput = [];
-
       if (ctype.includes("json")) {
         const body = await readJSON(req);
-        season = (body?.season || season).trim();
         rowsInput = Array.isArray(body?.rows) ? body.rows : [];
       } else {
         const raw = await readRaw(req);
         rowsInput = parseCSV(raw);
-        const sCol = rowsInput[0]?.["Saison"] || rowsInput[0]?.["season"];
-        if (sCol) season = String(sCol).trim() || season;
       }
 
       if (!rowsInput.length) return json(res, 400, { ok:false, error:"rows requis (JSON) ou texte vide" });
@@ -523,6 +538,7 @@ export default async function handler(req, res) {
       `;
 
       let upserted = 0, members_created = 0, teams_created = 0;
+      let lastSeason = null;
 
       for (const r0 of rowsInput) {
         const r = Object.fromEntries(Object.entries(r0).map(([k,v]) => [String(k).trim(), v]));
@@ -537,14 +553,23 @@ export default async function handler(req, res) {
         const amount = String(r["Montant"] || "").replace(',', '.').trim();
         const status = (r["Statut"] || "").trim();
 
-        const paid_at = (r["Payé le"] || "").trim();
-        const transfer_date = (r["Date du versement"] || "").trim();
-
         const license_validated = normBool(r["License validée"] || r["Licence validée"]);
         const license_text = (r["Licence"] || "").trim();
         const certificate_valid = normBool(r["CERTIFICAT MEDICAL"]);
         const t_shirt_size = (r["Taille de t-shirt"] || "").trim();
         const questionnaire_minor = normBool(r["Questionnaire de santé (Mineur)"]);
+
+        const paid_at_raw   = (r["Payé le"] || r["paid_at"] || "").trim();
+        const transfer_raw  = (r["Date du versement"] || r["transfer_date"] || "").trim();
+        let rowSeason = (r["Saison"] || r["season"] || "").trim();
+        if (!rowSeason) {
+          const refDate = paid_at_raw || transfer_raw;
+          rowSeason = refDate ? seasonLabelFromDate(new Date(refDate)) : defaultSeason;
+        }
+        const season = rowSeason || defaultSeason;
+        const paid_at = paid_at_raw;
+        const transfer_date = transfer_raw;
+        lastSeason = season;
 
         // équipe
         let team_id = null;
@@ -616,7 +641,7 @@ export default async function handler(req, res) {
         upserted++;
       }
 
-      return json(res, 200, { ok:true, upserted, members_created, teams_created, season });
+      return json(res, 200, { ok:true, upserted, members_created, teams_created, season: lastSeason || defaultSeason });
     }
 
     // 3) IMPORT SÉANCES
