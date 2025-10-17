@@ -17,6 +17,12 @@ function text(res, code, body) {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.end(body || "");
 }
+function withCORS(res) {
+  // CORS simple, utile pour tests / front
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
 
 // Lit le corps tel quel (texte brut)
 async function readRaw(req) {
@@ -114,21 +120,68 @@ function parseCSV(text) {
    Router principal
    ========================= */
 export default async function handler(req, res) {
+  withCORS(res);
+
+  // OPTIONS global (CORS/preflight)
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    return res.end();
+  }
+
   try {
-    const { method, url } = req;
-    const { pathname, searchParams } = new URL(url, "https://dummy.local");
+    // Normalisation ULTRA-robuste du chemin
+    const method = req.method;
+    const rawUrl = req.url || "/";
+    const safePath = rawUrl.split("?")[0] || "/"; // fallback si URL bizarres
+    const { pathname } = new URL(rawUrl, "https://dummy.local");
 
-    // petit helper pour gérer /chemin et /chemin/
-    const is = (p) => pathname === p || pathname === p + "/";
+    // helper /chemin et /chemin/
+    const is = (p) => safePath === p || safePath === p + "/" || pathname === p || pathname === p + "/";
 
-    /* === Routes sans DB === */
-    if (is("/api/hello") && method === "GET") {
+    /* === Index /api (utile pour debug) === */
+    if (is("/api") && method === "GET") {
+      return json(res, 200, {
+        ok: true,
+        routes: [
+          "GET /api/hello",
+          "GET /api/health",
+          "GET /api/env-check",
+          "GET /api/db/health",
+          "GET /api/teams",
+          "GET /api/members?team_id=",
+          "GET /api/dues?team_id=",
+          "GET|POST /api/sessions",
+          "GET|POST /api/attendance",
+          "GET|POST /api/import/members",
+          "POST /api/import/dues",
+          "POST /api/import/sessions"
+        ],
+        now: new Date().toISOString()
+      });
+    }
+
+    /* === Routes sans DB (toujours avant toute connexion DB) === */
+    if (is("/api/hello")) {
+      if (method !== "GET" && method !== "HEAD") {
+        res.setHeader("Allow", "GET, HEAD");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       return json(res, 200, { message: "Bienvenue sur club-app 👋" });
     }
-    if (is("/api/health") && method === "GET") {
+
+    if (is("/api/health")) {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       return json(res, 200, { ok: true, status: "healthy", ts: new Date().toISOString() });
     }
-    if (is("/api/env-check") && method === "GET") {
+
+    if (is("/api/env-check")) {
+      if (method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return json(res, 405, { ok:false, error:"Method Not Allowed" });
+      }
       return json(res, 200, { hasDatabaseUrl: !!process.env.DATABASE_URL });
     }
 
@@ -161,7 +214,8 @@ export default async function handler(req, res) {
         res.setHeader("Allow", "GET");
         return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
-      const team_id = searchParams.get("team_id");
+      const params = new URL(rawUrl, "https://dummy.local").searchParams;
+      const team_id = params.get("team_id");
       const rows = team_id
         ? await sql`
             select m.id, m.first_name, m.last_name, m.email,
@@ -188,7 +242,8 @@ export default async function handler(req, res) {
         res.setHeader("Allow", "GET");
         return json(res, 405, { ok:false, error:"Method Not Allowed" });
       }
-      const team_id = searchParams.get("team_id");
+      const params = new URL(rawUrl, "https://dummy.local").searchParams;
+      const team_id = params.get("team_id");
       const rows = team_id
         ? await sql`
             select member_id, first_name, last_name, email, member_number, team_name, paid_this_season
@@ -206,10 +261,12 @@ export default async function handler(req, res) {
 
     // Sessions GET/POST (GET: ?team_id= | ?team_name= | ?date=YYYY-MM-DD)
     if (is("/api/sessions")) {
+      const params = new URL(rawUrl, "https://dummy.local").searchParams;
+
       if (method === "GET") {
-        const team_id = searchParams.get("team_id");
-        const team_name = searchParams.get("team_name");
-        const dateStr = searchParams.get("date"); // yyyy-mm-dd (Europe/Paris)
+        const team_id = params.get("team_id");
+        const team_name = params.get("team_name");
+        const dateStr = params.get("date"); // yyyy-mm-dd (Europe/Paris)
 
         let rows;
         if (dateStr) {
@@ -277,8 +334,10 @@ export default async function handler(req, res) {
 
     // Attendance GET/POST
     if (is("/api/attendance")) {
+      const params = new URL(rawUrl, "https://dummy.local").searchParams;
+
       if (method === "GET") {
-        const session_id = searchParams.get("session_id");
+        const session_id = params.get("session_id");
         if (!session_id) return json(res, 400, { ok: false, error: "session_id requis" });
         const rows = await sql`
           select a.member_id, a.present
@@ -287,6 +346,7 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true, data: rows });
       }
+
       if (method === "POST") {
         const body = await readJSON(req);
         const { session_id, member_id, present } = body || {};
@@ -301,6 +361,7 @@ export default async function handler(req, res) {
         `;
         return json(res, 200, { ok: true });
       }
+
       res.setHeader("Allow", "GET, POST");
       return json(res, 405, { ok: false, error: "Method Not Allowed" });
     }
@@ -613,8 +674,8 @@ export default async function handler(req, res) {
     }
 
     // 404 API
-    if (pathname.startsWith("/api/")) {
-      return json(res, 404, { ok: false, error: "Not Found", path: pathname });
+    if (safePath.startsWith("/api/") || pathname.startsWith("/api/")) {
+      return json(res, 404, { ok: false, error: "Not Found", path: safePath });
     }
 
     // Pas une route /api/* => laisser Vercel servir le statique
